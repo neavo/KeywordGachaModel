@@ -1,0 +1,11 @@
+__pycache__
+
+/*.json
+
+/logs*
+/runs*
+/cache*
+/wandb*
+/assets*
+/output*
+/dataset*
