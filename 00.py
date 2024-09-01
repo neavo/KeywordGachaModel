@@ -32,7 +32,7 @@ from model.NERDataset import NERDataset
 from model.NERTrainerCallback import NERTrainerCallback
 
 # 参数设置
-MODEL_NAME = "facebookai_xlm_roberta_base_pretrain_20240823"
+MODEL_NAME = "facebookai_xlm_roberta_base_pretrain_20240826"
 MODEL_PATH = f"assets/{MODEL_NAME}"
 OUTPUT_PATH = "output"
 DATASET_PATH = "dataset/ner"
@@ -40,7 +40,7 @@ EPOCHS = 24
 PATIENCE = 12
 PATIENCE_KEEPER = 0
 BATCH_SIZE = 32
-GRADIENT_ACCUMULATION_SIZE = 64
+GRADIENT_ACCUMULATION_SIZE = 32
 FROZEN_LAYER = 0
 LEARNING_RATE = 2 * 1e-5
 DO_LOWER_CASE = False
@@ -65,13 +65,13 @@ def load_dataset(tokenizer):
         if file.name.endswith(".json"):
             with open(file.path, "r", encoding = "utf-8") as file:
                 count = count + 1
-                datas.extend(json.load(file))
+                datas.extend(random.sample(json.load(file), 10000))
 
     print(f"")
     print(f"找到数据文件 {count} 个，共 {len(datas)} 条数据 ...")
 
     # 分割数据集
-    train_datas, test_datas = train_test_split(datas, test_size = 0.02, shuffle = True, random_state = 42)
+    train_datas, test_datas = train_test_split(datas, test_size = 0.025, shuffle = True, random_state = 42)
 
     # 创建数据集和数据加载器
     print(f"")

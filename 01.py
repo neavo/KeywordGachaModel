@@ -41,9 +41,10 @@ DATASET_PATH = [
     ("dataset/pretrain/en_r18_visual_novels", 20 * 10000),
     ("dataset/pretrain/zh", 20 * 10000),
     ("dataset/pretrain/zh_r18_pixiv", 20 * 10000),
-    ("dataset/pretrain/jp", 17 * 10000),
-    ("dataset/pretrain/jp_r18", 17 * 10000),
-    ("dataset/pretrain/jp_r18_rpgmaker", 6 * 10000),
+    ("dataset/pretrain/jp", 15 * 10000),
+    ("dataset/pretrain/jp_r18", 15 * 10000),
+    ("dataset/pretrain/jp_r18_rpgmaker", 10 * 10000),
+    ("dataset/pretrain/kr", 40 * 10000),
 ]
 
 # 加载分词器
@@ -175,11 +176,9 @@ def load_dataset(tokenizer):
             count = count + 1
             with open(f"{dir_path}/{MODEL_NAME}_{dir_name}.txt", "r", encoding = "utf-8") as file:
                 datas_by_type = [line.strip() for line in tqdm(file, desc = path, total = num)]
-                random.shuffle(datas_by_type)
         else:
-            total = len([entry for entry in os.listdir(path) if os.path.isfile(os.path.join(path, entry))])
-
             lines = []
+            total = len([f for f in os.scandir(path) if f.name.endswith(".txt")])
             for file in tqdm(os.scandir(path), desc = path, total = total):
                 if file.name.endswith(".txt"):
                     with open(file.path, "r", encoding = "utf-8") as file:
@@ -201,6 +200,7 @@ def load_dataset(tokenizer):
         datas.extend(datas_by_type)
 
     # 生成数据集
+    random.shuffle(datas)
     os.makedirs("cache", exist_ok = True)
     dataset_train = Dataset.from_dict({"line": datas})
     dataset_train_tokenized = dataset_train.map(
