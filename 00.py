@@ -10,6 +10,7 @@ from rich import print
 
 import numpy
 import wandb
+import torch
 import evaluate
 import bitsandbytes
 from transformers import Trainer
@@ -17,9 +18,6 @@ from transformers import TrainingArguments
 from transformers import AutoConfig
 from transformers import AutoTokenizer
 from transformers import AutoModelForTokenClassification
-
-import torch
-from torch.utils.data import DataLoader
 
 from seqeval.metrics import f1_score
 from seqeval.metrics import recall_score
@@ -32,22 +30,27 @@ from model.NERDataset import NERDataset
 from model.NERTrainerCallback import NERTrainerCallback
 
 # 参数设置
-MODEL_NAME = "facebookai_xlm_roberta_base_pretrain_20240826"
+MODEL_NAME = "microsoft_mdeberta_v3_base_pretrain_20240916_e2"
 MODEL_PATH = f"assets/{MODEL_NAME}"
 OUTPUT_PATH = "output"
 DATASET_PATH = "dataset/ner"
-EPOCHS = 24
-PATIENCE = 12
-PATIENCE_KEEPER = 0
+EPOCHS = 16
+PATIENCE = 16
+PATIENCE_KEEPER = 3
 BATCH_SIZE = 32
-GRADIENT_ACCUMULATION_SIZE = 32
+GRADIENT_CHECKPOINTING = False
+GRADIENT_ACCUMULATION_SIZE = 128
 FROZEN_LAYER = 0
-LEARNING_RATE = 2 * 1e-5
+LEARNING_RATE = 5 * 1e-5
 DO_LOWER_CASE = False
 INTERVAL_STEPS = 200
 
-# 工作模式
-MODE_MEASUREMENT = False
+DATASET_PATH = [
+    ("dataset/ner/zh_1.json", 1 * 10000),
+    ("dataset/ner/en_1.json", 1 * 10000),
+    ("dataset/ner/jp_1.json", 1 * 10000),
+    ("dataset/ner/ko_1.json", 1 * 10000),
+]
 
 # 加载分词器
 def load_tokenizer():
@@ -61,32 +64,26 @@ def load_tokenizer():
 def load_dataset(tokenizer):
     count = 0
     datas = []
-    for file in os.scandir(DATASET_PATH):
-        if file.name.endswith(".json"):
-            with open(file.path, "r", encoding = "utf-8") as file:
-                count = count + 1
-                datas.extend(random.sample(json.load(file), 10000))
+    for path, num in DATASET_PATH:
+        with open(path, "r", encoding = "utf-8") as file:
+            count = count + 1
+            datas_input = json.load(file)
+            datas.extend(random.sample(datas_input, min(int(num), len(datas_input))))
 
     print(f"")
     print(f"找到数据文件 {count} 个，共 {len(datas)} 条数据 ...")
 
     # 分割数据集
-    train_datas, test_datas = train_test_split(datas, test_size = 0.025, shuffle = True, random_state = 42)
+    train_datas, test_datas = train_test_split(datas, test_size = 1000.0/len(datas), shuffle = True, random_state = 42)
 
     # 创建数据集和数据加载器
     print(f"")
-    test_dataset = NERDataset(test_datas, tokenizer, MODE_MEASUREMENT)
-    train_dataset = NERDataset(train_datas, tokenizer, MODE_MEASUREMENT)
+    test_dataset = NERDataset(test_datas, tokenizer)
+    train_dataset = NERDataset(train_datas, tokenizer)
     print(f"")
-    print(f"[green]test_dataset[/] 中最长条目为 {test_dataset.max_lenght} ...")
-    print(f"[green]train_dataloader[/] 中最长条目为 {train_dataset.max_lenght} ...")
+    print(f"[green]test_dataset[/] 中最长条目为 {test_dataset.max_lenght}，长度阈值已设置为 {test_dataset.token_length_threshold} ...")
+    print(f"[green]train_dataloader[/] 中最长条目为 {train_dataset.max_lenght}，长度阈值已设置为 {train_dataset.token_length_threshold} ...")
     print(f"")
-
-    # for sample in train_dataloader:
-    #     for k, v in sample.items():
-    #         print(f"{k} : {v}")
-    #     raise
-    # raise
 
     return test_dataset, train_dataset
 
@@ -169,23 +166,22 @@ def compute_metrics(eval_prediction, test_dataset, train_dataset):
 # 开始训练
 def start_training(model, tokenizer, test_dataset, train_dataset):
     training_args = TrainingArguments(
-        optim = "adamw_8bit",
+        # optim = "adamw_8bit",
         output_dir = OUTPUT_PATH,
         warmup_ratio = 0.1,
         weight_decay = 0.01,
         learning_rate = LEARNING_RATE,
-        logging_dir = "logs",   
-        logging_steps = INTERVAL_STEPS / 10,     
+        logging_dir = "logs",
+        logging_steps = INTERVAL_STEPS / 10,
         eval_steps = INTERVAL_STEPS,
         eval_strategy = "steps",
         save_strategy = "no",
-        save_safetensors = False,
         num_train_epochs = EPOCHS,
         bf16 = True,
         bf16_full_eval = True,
         per_device_eval_batch_size = min(128, BATCH_SIZE * 4),
         per_device_train_batch_size = BATCH_SIZE,
-        gradient_checkpointing = False,
+        gradient_checkpointing = GRADIENT_CHECKPOINTING,
         gradient_accumulation_steps = max(1, int(GRADIENT_ACCUMULATION_SIZE / BATCH_SIZE)),
     )
 
@@ -198,14 +194,6 @@ def start_training(model, tokenizer, test_dataset, train_dataset):
             patience_keeper = PATIENCE_KEEPER,
         )],
         tokenizer = tokenizer,
-        optimizers = (
-            bitsandbytes.optim.Adam8bit(
-                model.parameters(),
-                lr = LEARNING_RATE,
-                weight_decay = 0.01,
-            ),
-            None,
-        ),
         eval_dataset = test_dataset,
         train_dataset = train_dataset,
         compute_metrics = functools.partial(compute_metrics, test_dataset = test_dataset, train_dataset = train_dataset),
@@ -225,10 +213,6 @@ def main():
 
     # 加载数据集
     test_dataset, train_dataset = load_dataset(tokenizer)
-
-    # 测量模式时不继续后续流程
-    if MODE_MEASUREMENT:
-        return
 
     # 加载模型
     model = load_model(test_dataset, train_dataset)

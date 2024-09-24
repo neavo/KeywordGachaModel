@@ -14,14 +14,11 @@ from torch.nn.utils.rnn import pad_sequence
 class NERDataset(Dataset):
 
     CHUNK_SIZE = 2048
-    TOKEN_LENGTH_THRESHOLD = 256
 
-    def __init__(self, datas, tokenizer, mode_measurement):
+    def __init__(self, datas, tokenizer):
         self.tokenizer = tokenizer
-        self.mode_measurement = mode_measurement
-
         self.id2label, self.label2id = self.generate_id_label_map(datas)
-        self.encodings, self.max_lenght = self.generate_encodings(datas)
+        self.encodings, self.max_lenght, self.token_length_threshold = self.generate_encodings(datas)
 
     def __len__(self):
         return len(self.encodings)
@@ -46,10 +43,13 @@ class NERDataset(Dataset):
 
         return token_start, token_end
 
+    # 获取 Token 长度阈值
+    def get_token_length_threshold(self, datas):
+        return max(len(self.tokenizer(data.get("sentence", "")).input_ids) for data in datas)
+
     # 生成数据块
-    def generate_chunks(self, datas):
+    def generate_chunks(self, datas, token_length_threshold):
         encodings = []
-        max_lenght = 0
 
         for data in datas:
             sentence = data.get("sentence", "")
@@ -66,13 +66,10 @@ class NERDataset(Dataset):
                 sentence, 
                 padding = "max_length",
                 truncation = True,
-                max_length = 0 if self.mode_measurement else self.TOKEN_LENGTH_THRESHOLD,
+                max_length = token_length_threshold,
                 return_offsets_mapping = True if self.tokenizer.is_fast else False, # 只有快速 tokenizer 才有这个功能
                 return_special_tokens_mask = True
             )
-
-            # 记录最长条目
-            max_lenght = max(max_lenght, len(encoding.input_ids))
 
             # 根据特殊标记设置 attention_mask
             for token_i, is_special_token in enumerate(encoding.special_tokens_mask):
@@ -93,6 +90,7 @@ class NERDataset(Dataset):
             # print(f"{names}")
             # print(f"{encoding.labels}")
             # print(f"{self.tokenizer.convert_ids_to_tokens(encoding.input_ids)}")
+            # raise
 
             # Trainer 会自动将数据移动到 GPU，不需要手动显式移动
             data = {}
@@ -106,23 +104,35 @@ class NERDataset(Dataset):
                 data["attention_mask"] = torch.tensor(encoding.attention_mask)
             encodings.append(data)
 
-        return encodings, max_lenght
+        return encodings
 
     # 生成编码数据   
     def generate_encodings(self, datas):
         encodings = []
         max_lenght = 0
 
+        # 分割数据
         datas = [datas[i:(i + self.CHUNK_SIZE)] for i in range(0, len(datas), self.CHUNK_SIZE)]
+
+        # 获取 Token 长度阈值
         results = Parallel(n_jobs = -1, prefer = "processes", return_as = "generator_unordered")(
-            delayed(self.generate_chunks)(v) for v in datas
+            delayed(self.get_token_length_threshold)(v) for v in datas
         )
 
         for v in tqdm(results, total = len(datas)):
-            encodings.extend(v[0])
-            max_lenght = max(max_lenght, v[1])
+            max_lenght = max(max_lenght, v)
 
-        return encodings, max_lenght
+        token_length_threshold = max_lenght + 4
+
+        # 生成 Token 编码数据
+        results = Parallel(n_jobs = -1, prefer = "processes", return_as = "generator_unordered")(
+            delayed(self.generate_chunks)(v, token_length_threshold) for v in datas
+        )
+
+        for v in tqdm(results, total = len(datas)):
+            encodings.extend(v)
+
+        return encodings, max_lenght, token_length_threshold
 
     # 生成 ID-Label 映射表
     def generate_id_label_map(self, datas):

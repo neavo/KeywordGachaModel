@@ -215,7 +215,7 @@ class NERTrainerCallback(TrainerCallback):
                 + f"在本次评估中，最佳评估指标已更新 "
                 + f"{key_metrics_f1:.4f} / {self.best_metric_for_f1:.4f} ..."
             )
-            self.wait_for_early_stop = 0
+            # self.wait_for_early_stop = 0
             self.best_metric_for_f1 = key_metrics_f1
 
         if eval_loss_improved:
@@ -236,7 +236,8 @@ class NERTrainerCallback(TrainerCallback):
         if f1_improved or eval_loss_improved or train_loss_improved:
             print(f"")
 
-        if not f1_improved and not eval_loss_improved:
+        # if not f1_improved and not eval_loss_improved:
+        if not eval_loss_improved:
             self.wait_for_early_stop += 1
             print(""
                 + f"在本次评估中，"
@@ -255,5 +256,5 @@ class NERTrainerCallback(TrainerCallback):
         ):
             control.should_training_stop = True
             self.wait_for_early_stop = self.wait_for_early_stop - 1
-            print(f"在连续 {self.patience} 次的评估中，各项指标均未改善，训练已中止 ...")
+            print(f"在连续 {self.patience} 次的评估中，目标指标均未改善，训练已中止 ...")
             print(f"")

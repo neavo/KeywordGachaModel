@@ -24,13 +24,14 @@ from helper.TextHelper import TextHelper
 from model.PreTrainerCallback import PreTrainerCallback
 
 # 参数设置
-MODEL_NAME = "facebookai_xlm_roberta_base"
+MODEL_NAME = "microsoft_mdeberta_v3_base_pretrain_20240916_e1"
 MODEL_PATH = f"assets/{MODEL_NAME}"
 OUTPUT_PATH = f"output/{MODEL_NAME}_pretrain"
-EPOCHS = 2
+EPOCHS = 1
 LENGTH_THRESHOLD = 256
-BATCH_SIZE = 11
-GRADIENT_ACCUMULATION_SIZE = 128
+BATCH_SIZE = 8
+GRADIENT_CHECKPOINTING = False
+GRADIENT_ACCUMULATION_SIZE = 256
 DO_LOWER_CASE = False
 LEARNING_RATE = 2 * 1e-5
 INTERVAL_STEPS = 200
@@ -41,9 +42,9 @@ DATASET_PATH = [
     ("dataset/pretrain/en_r18_visual_novels", 20 * 10000),
     ("dataset/pretrain/zh", 20 * 10000),
     ("dataset/pretrain/zh_r18_pixiv", 20 * 10000),
-    ("dataset/pretrain/jp", 15 * 10000),
-    ("dataset/pretrain/jp_r18", 15 * 10000),
-    ("dataset/pretrain/jp_r18_rpgmaker", 10 * 10000),
+    ("dataset/pretrain/jp", 40 * 10000),
+    ("dataset/pretrain/jp_r18", 20 * 10000),
+    ("dataset/pretrain/jp_r18_rpg", 20 * 10000),
     ("dataset/pretrain/kr", 40 * 10000),
 ]
 
@@ -89,6 +90,7 @@ def cleanup(line):
 
     # 移除开头结尾的符号
     line = TextHelper.strip_punctuation(line)
+
 
     return line
 
@@ -151,7 +153,7 @@ def map_function(tokenizer, samples):
         truncation = True,
         max_length = LENGTH_THRESHOLD,
         return_attention_mask = True,
-        return_offsets_mapping = True,
+        return_offsets_mapping = True if tokenizer.is_fast else False, # 只有快速 tokenizer 才有这个功能
         return_special_tokens_mask = True,
     )
 
@@ -195,7 +197,7 @@ def load_dataset(tokenizer):
 
             datas_by_type = random.sample(datas_by_type, min(int(num), len(datas_by_type)))
             with open(f"{dir_path}/{MODEL_NAME}_{dir_name}.txt", "w", encoding = "utf-8") as file:
-                file.writelines([f"{line}\n" for line in datas_by_type])
+                file.writelines("\n".join(datas_by_type))
 
         datas.extend(datas_by_type)
 
@@ -266,17 +268,16 @@ def start_training(model, tokenizer, dataset_train_tokenized):
         warmup_ratio = 0.1,
         weight_decay = 0.01,
         learning_rate = LEARNING_RATE,
-        logging_dir = "logs",   
-        logging_steps = INTERVAL_STEPS / 10,     
+        logging_dir = "logs",
+        logging_steps = INTERVAL_STEPS / 10,
         eval_strategy = "no",
         save_strategy = "steps",
         save_steps = INTERVAL_STEPS,
         save_total_limit = 3,
-        save_safetensors = False,
         num_train_epochs = EPOCHS,
         bf16 = True,
         per_device_train_batch_size = BATCH_SIZE,
-        gradient_checkpointing = True,
+        gradient_checkpointing = GRADIENT_CHECKPOINTING,
         gradient_accumulation_steps = max(1, int(GRADIENT_ACCUMULATION_SIZE / BATCH_SIZE)),
     )
 
@@ -287,14 +288,6 @@ def start_training(model, tokenizer, dataset_train_tokenized):
         callbacks = [
             PreTrainerCallback(),
         ],
-        optimizers = (
-            bitsandbytes.optim.Adam8bit(
-                model.parameters(),
-                lr = LEARNING_RATE,
-                weight_decay = 0.01,
-            ),
-            None,
-        ),
         data_collator = DataCollatorForWholeWordMask(
             tokenizer = tokenizer,
             mlm = True, 
