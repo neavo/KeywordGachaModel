@@ -1,6 +1,4 @@
-import os
 import re
-import sys
 
 from tqdm import tqdm
 from rich import print
@@ -26,7 +24,7 @@ class NERDataset(Dataset):
     def __getitem__(self, idx):
         return self.encodings[idx]
 
-    # 通过字符位置反查 token 位置 
+    # 通过字符位置反查 token 位置
     def char_to_token(self, encoding, char_start, char_end):
         token_end = 0
         token_start = 0
@@ -35,7 +33,7 @@ class NERDataset(Dataset):
             if start <= char_end < end:
                 token_end = i
                 break
-    
+
         for i, (start, end) in enumerate(encoding.offset_mapping):
             if start <= char_start < end:
                 token_start = i
@@ -63,7 +61,7 @@ class NERDataset(Dataset):
 
             # 执行编码
             encoding = self.tokenizer(
-                sentence, 
+                sentence,
                 padding = "max_length",
                 truncation = True,
                 max_length = token_length_threshold,
@@ -83,7 +81,7 @@ class NERDataset(Dataset):
             else:
                 encoding.labels = self.generate_labels_fast(
                     encoding, sentence, names, encoding.tokens(), ner_types
-                )            
+                )
 
             # 调试用
             # print(f"{sentence}")
@@ -106,7 +104,7 @@ class NERDataset(Dataset):
 
         return encodings
 
-    # 生成编码数据   
+    # 生成编码数据
     def generate_encodings(self, datas):
         encodings = []
         max_lenght = 0
@@ -177,12 +175,12 @@ class NERDataset(Dataset):
 
                     if token_start is None and token_start_offset <= char_start < token_end_offset:
                         token_start = i + 1  # 修正起始位置为实际 token 的位置
-                        
+
                     if token_start is not None and token_start_offset < char_end <= token_end_offset:
                         token_end = i + 2  # 修正结束位置为实际 token 的位置
                         break
 
-                if token_start is not None and token_end is not None:                    
+                if token_start is not None and token_end is not None:
                     found_targets.append({
                         "name": name,
                         "char_start": char_start,
@@ -199,7 +197,7 @@ class NERDataset(Dataset):
                     labels[i] = self.label2id.get(f"B-{ner_types.get(target.get("name", ""), "O")}", 0)
                 elif target.get("token_start") < i < target.get("token_end"):
                     labels[i] = self.label2id.get(f"I-{ner_types.get(target.get("name", ""), "O")}", 0)
-        
+
         return labels
 
     # 生成标签列表 - 快速 Tokenizer 版本

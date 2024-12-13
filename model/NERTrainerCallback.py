@@ -1,24 +1,28 @@
 import os
 import json
 import shutil
-import matplotlib.pyplot as plt  # 使用 matplotlib 绘图
-
-import torch
 
 from rich import box
 from rich import print
 from rich.table import Table
 from rich.console import Console
 from dataclasses import asdict
+from transformers import Trainer
+from transformers import TrainerState
+from transformers import TrainerControl
 from transformers import TrainerCallback
+from transformers import TrainingArguments
 
 class NERTrainerCallback(TrainerCallback):
-    def __init__(self, model_name, patience, patience_keeper):
-        self.console = Console()
 
-        self.model_name = model_name
-        self.patience = int(patience)               # 早停耐心值，即最大允许没有改进的轮数
-        self.patience_keeper = int(patience_keeper) # 早停静默轮次，即前x轮不触发早停
+    def __init__(self, model_name: str, patience: int, patience_keeper: int) -> None:
+
+        # 初始化
+        self.model_name = model_name                    # 模型名称
+        self.patience = int(patience)                   # 早停耐心值，即最大允许没有改进的轮数
+        self.patience_keeper = int(patience_keeper)     # 早停静默轮次，即前x轮不触发早停
+
+        self.console = Console()
         self.wait_for_early_stop = 0
         self.best_metric_for_save = -float("inf")
         self.best_metric_for_eval_loss = float("inf")
@@ -26,7 +30,6 @@ class NERTrainerCallback(TrainerCallback):
         self.best_metric_for_f1 = -float("inf")
 
         # 初始化记录每种指标的历史数据
-        self.training_epochs = []
         self.metrics_history = {
             "train_loss": [],
             "eval_loss": [],
@@ -34,13 +37,13 @@ class NERTrainerCallback(TrainerCallback):
             "recall": [],
             "precision": []
         }
-        
-    def set_trainer(self, trainer):
+
+    def set_trainer(self, trainer: Trainer) -> None:
         self.trainer = trainer
+        self.tokenizer = trainer.processing_class
 
     # 在训练开始时检查并移除旧的模型保存目录
-    def on_train_begin(self, args, state, control, **kwargs):
-        self.tokenizer = kwargs.get("tokenizer")
+    def on_train_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: dict) -> None:
         self.best_path = f"{args.output_dir}/{self.model_name.replace("-", "_")}_ner_best"
         self.lastest_path = f"{args.output_dir}/{self.model_name.replace("-", "_")}_ner_latest"
 
@@ -50,83 +53,26 @@ class NERTrainerCallback(TrainerCallback):
         os.makedirs(self.lastest_path, exist_ok = True)
 
     # 评估时
-    def on_evaluate(self, args, state, control, metrics, **kwargs):
+    def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics: dict, **kwargs: dict) -> None:
         # 先更新指标
-        self.update_metrics(args, state, control, metrics, **kwargs)
-
-        # 再执行后续步骤
-        self.save_lastest(args, state, control, metrics, **kwargs)
-        self.check_and_save_best(args, state, control, metrics, **kwargs)
-        self.check_early_stopping(args, state, control, metrics, **kwargs)
-
-        return control
-
-    # 结束训练时 
-    def on_train_end(self, args, state, control, **kwargs):
-        self.trainer.evaluate()
-
-    # 逆序从字典或者自定义对象中查找第一个匹配的键对应的值
-    def find_first_match_from_end(self, d, target_key, default = None):
-        # 定义一个内部函数来递归地搜索值
-        def search_value(value):
-            # 如果值是字典，并且包含目标键，则返回该值
-            if isinstance(value, dict) and target_key in value:
-                return value[target_key]
-            # 如果值是列表，则递归地在列表中查找
-            elif isinstance(value, list):
-                for item in reversed(value):
-                    result = search_value(item)
-                    if result is not None:
-                        return result
-            # 如果值是自定义对象，并且对象有属性或方法返回目标键的值
-            elif hasattr(value, target_key):
-                return getattr(value, target_key)
-            # 如果属性值是字典或列表，递归地在其中查找
-            elif isinstance(getattr(value, target_key, None), (dict, list)):
-                return search_value(getattr(value, target_key))
-
-        # 从嵌套结构的结尾开始查找
-        if isinstance(d, (dict, list)):
-            for item in reversed(d):
-                result = search_value(item)
-                if result is not None:
-                    return result
-        elif hasattr(d, target_key):
-            return search_value(d)
-
-        # 如果没有找到匹配项，返回默认值
-        return default
-
-    # 更新评估指标并保存
-    def update_metrics(self, args, state, control, metrics, **kwargs):
-        # 更新指标历史和训练轮数
-        self.metrics_history["train_loss"].append(self.find_first_match_from_end(state.log_history, "loss", float("inf")))
+        self.metrics_history["train_loss"] = self.generate_train_loss_metrics(args, state, control, metrics, **kwargs)
         self.metrics_history["eval_loss"].append(metrics.get("eval_loss", float("inf")))
         self.metrics_history["f1"].append(metrics.get("eval_f1", 0))
         self.metrics_history["recall"].append(metrics.get("eval_recall", 0))
         self.metrics_history["precision"].append(metrics.get("eval_precision", 0))
-        self.training_epochs.append(state.epoch)  # 记录训练轮数
 
-        # 创建图形
-        plt.figure(figsize = (12, 8))
+        # 再执行后续步骤
+        self.print_log(args, state, control, metrics, **kwargs)
+        self.save_lastest(args, state, control, metrics, **kwargs)
+        self.check_and_save_best(args, state, control, metrics, **kwargs)
+        self.check_early_stopping(args, state, control, metrics, **kwargs)
 
-        # 绘制所有指标
-        plt.plot(self.training_epochs, self.metrics_history["train_loss"], label="Train Loss", color="blue")
-        plt.plot(self.training_epochs, self.metrics_history["eval_loss"], label="Eval Loss", color="orange")
-        plt.plot(self.training_epochs, self.metrics_history["f1"], label="F1 Score", color="green")
-        plt.plot(self.training_epochs, self.metrics_history["recall"], label="Recall", color="red")
-        plt.plot(self.training_epochs, self.metrics_history["precision"], label="Precision", color="purple")
+    # 结束训练时
+    def on_train_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: dict) -> None:
+        self.trainer.evaluate()
 
-        plt.title("Metrics Trends")
-        plt.xlabel("Training Epochs")
-        plt.ylabel("Value")
-        plt.legend()  # 添加图例
-
-        # 保存图表到文件
-        plt.savefig(f"{self.best_path}/metrics_trends.png")
-        plt.savefig(f"{self.lastest_path}/metrics_trends.png")
-        plt.close()  # 关闭图形，以释放资源
-
+    # 打印评估信息
+    def print_log(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics: dict, **kwargs: dict) -> None:
         # 打印表格到控制台
         table = Table(box = box.ASCII2, expand = True, highlight = True, show_lines = True, show_header = False, border_style = "light_goldenrod2")
         table.add_column(justify = "left")
@@ -160,7 +106,7 @@ class NERTrainerCallback(TrainerCallback):
         self.console.print("")
 
     # 保存当前 模型、tokenizer 和 评估信息 到本地
-    def save_lastest(self, args, state, control, metrics, **kwargs):
+    def save_lastest(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics: dict, **kwargs: dict) -> None:
         # 保存最新模型到指定目录
         self.trainer.save_model(self.lastest_path)
         self.tokenizer.save_pretrained(self.lastest_path)
@@ -168,16 +114,16 @@ class NERTrainerCallback(TrainerCallback):
         # 保存评估信息
         metrics["train_loss"] = self.metrics_history["train_loss"][-1]
         metrics_file = os.path.join(self.lastest_path, "metrics.json")
-        with open(metrics_file, "w", encoding = "utf-8") as file:
-            json.dump(metrics, file, indent = 4, ensure_ascii = True)
+        with open(metrics_file, "w", encoding = "utf-8") as writer:
+            writer.write(json.dumps(metrics, indent = 4, ensure_ascii = True))
 
         # 保存训练参数
         training_args_file = os.path.join(self.lastest_path, "training_args.json")
-        with open(training_args_file, "w", encoding = "utf-8") as file:
-            json.dump(asdict(args), file, indent = 4, ensure_ascii = True)
+        with open(training_args_file, "w", encoding = "utf-8") as writer:
+            writer.write(json.dumps(asdict(args), indent = 4, ensure_ascii = True))
 
     # 判断是否需要保存最佳模型
-    def check_and_save_best(self, args, state, control, metrics, **kwargs):
+    def check_and_save_best(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics: dict, **kwargs: dict) -> None:
         key_metrics = self.metrics_history["f1"][-1]
 
         if key_metrics > self.best_metric_for_save:
@@ -189,72 +135,77 @@ class NERTrainerCallback(TrainerCallback):
             # 保存评估信息
             metrics["train_loss"] = self.metrics_history["train_loss"][-1]
             metrics_file = os.path.join(self.best_path, "metrics.json")
-            with open(metrics_file, "w", encoding = "utf-8") as file:
-                json.dump(metrics, file, indent = 4, ensure_ascii = True)
+            with open(metrics_file, "w", encoding = "utf-8") as writer:
+                writer.write(json.dumps(metrics, indent = 4, ensure_ascii = True))
 
             # 保存训练参数
             training_args_file = os.path.join(self.best_path, "training_args.json")
-            with open(training_args_file, "w", encoding = "utf-8") as file:
-                json.dump(asdict(args), file, indent = 4, ensure_ascii = True)
+            with open(training_args_file, "w", encoding = "utf-8") as writer:
+                writer.write(json.dumps(asdict(args), indent = 4, ensure_ascii = True))
 
     # 判断是否需要触发早停
-    def check_early_stopping(self, args, state, control, metrics, **kwargs):
-        if control.should_training_stop:
+    def check_early_stopping(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics: dict, **kwargs: dict) -> None:
+        # 获取当前评估指标
+        metrics_f1 = self.metrics_history["f1"][-1]
+        metrics_eval_loss = self.metrics_history["eval_loss"][-1]
+        metrics_train_loss = self.metrics_history["train_loss"][-1]
+
+        # 判断评估指标情况
+        f1_improved = metrics_f1 > self.best_metric_for_f1
+        eval_loss_improved = metrics_eval_loss < self.best_metric_for_eval_loss
+        train_loss_improved = metrics_train_loss < self.best_metric_for_train_loss
+
+        # 更新最佳评估指标
+        if f1_improved == True:
+            print(f"在本次评估中，最佳评估指标已更新 {metrics_f1:.4f} / {self.best_metric_for_f1:.4f} ...")
+            self.best_metric_for_f1 = metrics_f1
+
+        # 更新最佳评估损失
+        if eval_loss_improved == True:
+            print(f"在本次评估中，最佳评估损失已更新 {metrics_eval_loss:.4f} / {self.best_metric_for_eval_loss:.4f} ...")
+            self.best_metric_for_eval_loss = metrics_eval_loss
+
+        # 更新最佳训练损失
+        if train_loss_improved == True:
+            print(f"在本次评估中，最佳训练损失已更新 {metrics_train_loss:.4f} / {self.best_metric_for_train_loss:.4f} ...")
+            self.best_metric_for_train_loss = metrics_train_loss
+
+        # 打印分隔行
+        print("") if f1_improved == True or eval_loss_improved == True or train_loss_improved == True else None
+
+        # 如果评估指标或评估损失有更新，则耐心计数值重置，否则耐心计数值增加
+        if f1_improved == True or eval_loss_improved == True:
+            self.wait_for_early_stop = 0
+        else:
+            self.wait_for_early_stop = self.wait_for_early_stop + 1
+            print(
+                "\n"
+                + "在本次评估中，"
+                + f"评估指标为 {metrics_f1:.4f} / {self.best_metric_for_f1:.4f}，"
+                + f"评估损失为 {metrics_eval_loss:.4f} / {self.best_metric_for_eval_loss:.4f}，"
+                + f"训练损失为 {metrics_train_loss:.4f} / {self.best_metric_for_train_loss:.4f}，"
+                + f"耐心计数值为 {float(self.wait_for_early_stop):.4f} ..."
+                + "\n"
+            )
+
+        # 如果轮数小于等于耐心保持值，则不触发早停
+        if state.epoch <= self.patience_keeper:
             return
 
-        key_metrics_f1 = self.metrics_history["f1"][-1]
-        key_metrics_eval_loss = self.metrics_history["eval_loss"][-1]
-        key_metrics_train_loss = self.metrics_history["train_loss"][-1]
+        # 如果耐心计数值小于耐心值，则不触发早停
+        if self.wait_for_early_stop <= self.patience:
+            return
 
-        f1_improved = key_metrics_f1 > self.best_metric_for_f1
-        eval_loss_improved = key_metrics_eval_loss < self.best_metric_for_eval_loss
-        train_loss_improved = key_metrics_train_loss < self.best_metric_for_train_loss
+        # 如果评估损失尚未与训练损失交叉，则不触发早停
+        if self.best_metric_for_eval_loss <= self.best_metric_for_train_loss:
+            return
 
-        if f1_improved:
-            print(""
-                + f"在本次评估中，最佳评估指标已更新 "
-                + f"{key_metrics_f1:.4f} / {self.best_metric_for_f1:.4f} ..."
-            )
-            # self.wait_for_early_stop = 0
-            self.best_metric_for_f1 = key_metrics_f1
+        print(f"在连续 {self.patience} 次的评估中，目标指标均未改善，训练已中止 ...")
+        print("")
 
-        if eval_loss_improved:
-            print(""
-                + f"在本次评估中，最佳评估损失已更新 "
-                + f"{key_metrics_eval_loss:.4f} / {self.best_metric_for_eval_loss:.4f} ..."
-            )
-            self.wait_for_early_stop = 0
-            self.best_metric_for_eval_loss = key_metrics_eval_loss
+        # 触发早停
+        control.should_training_stop = True
 
-        if train_loss_improved:
-            print(""
-                + f"在本次评估中，最佳训练损失已更新 "
-                + f"{key_metrics_train_loss:.4f} / {self.best_metric_for_train_loss:.4f} ..."
-            )
-            self.best_metric_for_train_loss = key_metrics_train_loss
-
-        if f1_improved or eval_loss_improved or train_loss_improved:
-            print(f"")
-
-        # if not f1_improved and not eval_loss_improved:
-        if not eval_loss_improved:
-            self.wait_for_early_stop += 1
-            print(""
-                + f"在本次评估中，"
-                + f"评估指标为 {key_metrics_f1:.4f} / {self.best_metric_for_f1:.4f}，"
-                + f"评估损失为 {key_metrics_eval_loss:.4f} / {self.best_metric_for_eval_loss:.4f}，"
-                + f"训练损失为 {key_metrics_train_loss:.4f} / {self.best_metric_for_train_loss:.4f}，"
-                + f"耐心计数器值为 {self.wait_for_early_stop:.4f} ..."
-            )
-            print(f"")
-
-        # 如果等待时间超过耐心值，则触发早停
-        if (
-            state.epoch > self.patience_keeper
-            and self.wait_for_early_stop >= self.patience
-            and self.best_metric_for_eval_loss > self.best_metric_for_train_loss
-        ):
-            control.should_training_stop = True
-            self.wait_for_early_stop = self.wait_for_early_stop - 1
-            print(f"在连续 {self.patience} 次的评估中，目标指标均未改善，训练已中止 ...")
-            print(f"")
+    # 生成训练损失评估指标
+    def generate_train_loss_metrics(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics: dict, **kwargs: dict) -> None:
+        return [v.get("loss") for v in state.log_history if "loss" in v]

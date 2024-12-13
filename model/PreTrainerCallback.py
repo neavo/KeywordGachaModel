@@ -4,12 +4,8 @@ import json
 from transformers import TrainerCallback
 
 class PreTrainerCallback(TrainerCallback):
-    def __init__(self):
-        pass
 
-    def on_save(self, args, state, control, **kwargs):
-        path = args.output_dir
-
+    def on_save(self, args, state, control, **kwargs) -> None:
         for f in os.scandir(args.output_dir):
             if f.is_dir() and f.name.startswith("checkpoint"):
                 os.makedirs(f.path, exist_ok = True)
