@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import random
@@ -23,78 +24,38 @@ from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
 from model.PreTrainerCallback import PreTrainerCallback
 
-# 参数设置
-MODEL_NAME = "facebookai_xlm_roberta_base"
+# 模型
+MODEL_NAME = "modern_bert_multilingual"
 MODEL_PATH = f"assets/{MODEL_NAME}"
-OUTPUT_PATH = f"output/{MODEL_NAME}_pretrain"
-EPOCHS = 2
-LENGTH_THRESHOLD = 256
-BATCH_SIZE = 8
-GRADIENT_CHECKPOINTING = False
-GRADIENT_ACCUMULATION_SIZE = 0
-DO_LOWER_CASE = False
+OUTPUT_PATH = f"output/{MODEL_NAME}_pt"
+
+# 训练
 LEARNING_RATE = 2 * 1e-5
+EPOCHS = 2
+EVAL_SIZE = 16
+BATCH_SIZE = 16
+GRADIENT_CHECKPOINTING = False
+GRADIENT_ACCUMULATION_SIZE = 128
+
+# 输出
+LOG_STEPS = 5
 INTERVAL_STEPS = 100
+SAVE_TOTAL_LIMIT = 0
 AUTO_RESUME_FROM_CHECKPOINT = True
 
+# 数据
+DO_LOWER_CASE = False
+LENGTH_THRESHOLD = 256
 DATASET_PATH = [
-    ("dataset/pretrain/en", 60 * 10000),
+    ("dataset/pretrain/en", 20 * 10000),
     ("dataset/pretrain/en_r18_visual_novels", 20 * 10000),
-    ("dataset/pretrain/zh", 40 * 10000),
-    ("dataset/pretrain/zh_r18_pixiv", 40 * 10000),
-    ("dataset/pretrain/jp", 100 * 10000),
-    ("dataset/pretrain/jp_r18", 40 * 10000),
-    ("dataset/pretrain/jp_r18_rpg", 20 * 10000),
-    ("dataset/pretrain/kr", 80 * 10000),
+    ("dataset/pretrain/zh", 20 * 10000),
+    ("dataset/pretrain/zh_r18_pixiv", 20 * 10000),
+    ("dataset/pretrain/jp", 50 * 10000),
+    ("dataset/pretrain/jp_r18", 20 * 10000),
+    ("dataset/pretrain/jp_r18_rpg", 10 * 10000),
+    ("dataset/pretrain/kr", 40 * 10000),
 ]
-
-# 可能存在的空字符
-SPACE_PATTERN = r"\s*"
-
-# 用于英文的代码段规则
-CODE_PATTERN_EN = (
-    SPACE_PATTERN + r"if\(.{0,5}[vs]\[\d+\].{0,10}\)" + SPACE_PATTERN,            # if(!s[982]) if(s[1623]) if(v[982] >= 1)
-    SPACE_PATTERN + r"en\(.{0,5}[vs]\[\d+\].{0,10}\)" + SPACE_PATTERN,            # en(!s[982]) en(v[982] >= 1)
-    SPACE_PATTERN + r"[/\\][a-z]{1,5}<[\d]{0,10}>" + SPACE_PATTERN,               # /C<1> \FS<12>
-    SPACE_PATTERN + r"[/\\][a-z]{1,5}\[[\d]{0,10}\]" + SPACE_PATTERN,             # /C[1] \FS[12]
-    SPACE_PATTERN + r"[/\\][a-z]{1,5}(?=<[^0-9]{0,10}>)" + SPACE_PATTERN,         # /C<非数字> \FS<非数字> 中的前半部分
-    SPACE_PATTERN + r"[/\\][a-z]{1,5}(?=\[[^0-9]{0,10}\])" + SPACE_PATTERN,       # /C[非数字] \FS[非数字] 中的前半部分
-)
-
-# 用于非英文的代码段规则
-CODE_PATTERN_NON_EN = (
-    SPACE_PATTERN + r"if\(.{0,5}[vs]\[\d+\].{0,10}\)" + SPACE_PATTERN,            # if(!s[982]) if(v[982] >= 1) if(v[982] >= 1)
-    SPACE_PATTERN + r"en\(.{0,5}[vs]\[\d+\].{0,10}\)" + SPACE_PATTERN,            # en(!s[982]) en(v[982] >= 1)
-    SPACE_PATTERN + r"[/\\][a-z]{1,5}<[a-z\d]{0,10}>" + SPACE_PATTERN,            # /C<y> /C<1> \FS<xy> \FS<12>
-    SPACE_PATTERN + r"[/\\][a-z]{1,5}\[[a-z\d]{0,10}\]" + SPACE_PATTERN,          # /C[x] /C[1] \FS[xy] \FS[12]
-    SPACE_PATTERN + r"[/\\][a-z]{1,5}(?=<[^a-z0-9]{0,10}>)" + SPACE_PATTERN,      # /C<非数字非字母> \FS<非数字非字母> 中的前半部分
-    SPACE_PATTERN + r"[/\\][a-z]{1,5}(?=\[[^a-z0-9]{0,10}\])" + SPACE_PATTERN,    # /C[非数字非字母] \FS[非数字非字母] 中的前半部分
-)
-
-# 同时作用于英文于非英文的代码段规则
-CODE_PATTERN_COMMON = (
-    SPACE_PATTERN + r"\\fr" + SPACE_PATTERN,                                      # 重置文本的改变
-    SPACE_PATTERN + r"\\fb" + SPACE_PATTERN,                                      # 加粗
-    SPACE_PATTERN + r"\\fi" + SPACE_PATTERN,                                      # 倾斜
-    SPACE_PATTERN + r"\\\{" + SPACE_PATTERN,                                      # 放大字体 \{
-    SPACE_PATTERN + r"\\\}" + SPACE_PATTERN,                                      # 缩小字体 \}
-    SPACE_PATTERN + r"\\g" + SPACE_PATTERN,                                       # 显示货币 \G
-    SPACE_PATTERN + r"\\\$" + SPACE_PATTERN,                                      # 打开金币框 \$
-    SPACE_PATTERN + r"\\\." + SPACE_PATTERN,                                      # 等待0.25秒 \.
-    SPACE_PATTERN + r"\\\|" + SPACE_PATTERN,                                      # 等待1秒 \|
-    SPACE_PATTERN + r"\\!" + SPACE_PATTERN,                                       # 等待按钮按下 \!
-    SPACE_PATTERN + r"\\>" + SPACE_PATTERN,                                       # 在同一行显示文字 \>
-    # SPACE_PATTERN + r"\\<" + SPACE_PATTERN,                                     # 取消显示所有文字 \<
-    SPACE_PATTERN + r"\\\^" + SPACE_PATTERN,                                      # 显示文本后不需要等待 \^
-    # SPACE_PATTERN + r"\\n" + SPACE_PATTERN,                                     # 换行符 \\n
-    SPACE_PATTERN + r"\r\n" + SPACE_PATTERN,                                      # 换行符 \r\n
-    SPACE_PATTERN + r"\n" + SPACE_PATTERN,                                        # 换行符 \n
-    SPACE_PATTERN + r"\\\\<br>" + SPACE_PATTERN,                                  # 换行符 \\<br>
-    SPACE_PATTERN + r"<br>" + SPACE_PATTERN,                                      # 换行符 <br>
-)
-
-PATTERN_EN = re.compile(rf"(?:{"|".join(CODE_PATTERN_EN + CODE_PATTERN_COMMON)})+", re.IGNORECASE)
-PATTERN_NON_EN = re.compile(rf"(?:{"|".join(CODE_PATTERN_NON_EN + CODE_PATTERN_COMMON)})+", re.IGNORECASE)
 
 # 加载分词器
 def load_tokenizer() -> PreTrainedTokenizerFast:
@@ -110,10 +71,17 @@ def split(datas: list[str], size: int) -> list[list[str]]:
 
 # 清理文本
 def cleanup(line: str, path: str) -> str:
-    if "en" in path:
-        line = PATTERN_EN.sub(" ", line)
-    else:
-        line = PATTERN_NON_EN.sub(" ", line)
+    # 将空格以外的空白符都替换为空格
+    # \t：制表符
+    # \n：换行符
+    # \r：回车符
+    # \v：垂直制表符
+    # \f：换页符
+    # \u3000：全角空格
+    line = re.sub(r"[\t\n\r\v\f\u3000]+", " ", line)
+
+    # 将多个空格替换为单个空格
+    line = re.sub(r" +", " ", line)
 
     if "en" in path:
         line = unicodedata.normalize("NFKC", line)
@@ -195,7 +163,7 @@ def generate_text_file(path: str, file_path: str, tokenizer: PreTrainedTokenizer
 
     # 并行处理数据分段进行
     data = []
-    results = Parallel(n_jobs = os.cpu_count() - 1, prefer = "processes", return_as = "generator_unordered")(
+    results = Parallel(n_jobs = os.cpu_count(), prefer = "processes", return_as = "generator_unordered")(
         delayed(generate_chunks)(tokenizer, v, path) for v in chunks
     )
     for result in tqdm(results, desc = path, total = len(chunks)):
@@ -209,10 +177,10 @@ def generate_text_file(path: str, file_path: str, tokenizer: PreTrainedTokenizer
     return total
 
 # 加载数据集
-def load_dataset(tokenizer: PreTrainedTokenizerFast) -> Dataset:
-    print(f"")
-    print(f"正在加载数据集 ...")
-    print(f"")
+def load_dataset(tokenizer: PreTrainedTokenizerFast) -> tuple[Dataset, Dataset]:
+    print("")
+    print("正在加载数据集 ...")
+    print("")
 
     # 遍历数据集路径
     total = 0
@@ -232,9 +200,9 @@ def load_dataset(tokenizer: PreTrainedTokenizerFast) -> Dataset:
 
     # 生成数据集
     os.makedirs("dataset/pretrain/cache", exist_ok = True)
-    dataset_train_tokenized = Dataset.from_text(paths).map(
+    dataset_tokenized = Dataset.from_text(paths).map(
         lambda samples: map_function(tokenizer, samples),
-        num_proc = os.cpu_count() - 1,
+        num_proc = 8,
         batched = True,
         batch_size = 1024,
         writer_batch_size = 8 * 1024,
@@ -244,17 +212,28 @@ def load_dataset(tokenizer: PreTrainedTokenizerFast) -> Dataset:
     )
 
     # 计算有效的 Token 数量
-    total_length = sum(dataset_train_tokenized["input_length"])
+    total_length = sum(dataset_tokenized["input_length"])
 
     # 打印数据集信息
     print(
         "\n"
-        + f"找到数据文件 {total} 个，数据条目 {dataset_train_tokenized.num_rows} 个，"
-        + f"有效 Token {(total_length / 1000 / 1000):.2f} M，平均每个条目 {(total_length / dataset_train_tokenized.num_rows):.2f} Token ..."
+        + f"找到数据文件 {total} 个，数据条目 {dataset_tokenized.num_rows} 个，"
+        + f"有效 Token {(total_length / 1000 / 1000):.2f} M，平均每个条目 {(total_length / dataset_tokenized.num_rows):.2f} Token ..."
         + "\n"
     )
 
-    return dataset_train_tokenized
+    # 拆分数据集
+    dataset_dict = dataset_tokenized.train_test_split(
+        seed = 42,
+        shuffle = True,
+        test_size = 2048,
+        keep_in_memory = True,
+        load_from_cache_file = False,
+        test_cache_file_name = None,
+        train_cache_file_name = None,
+    )
+
+    return dataset_dict.get("test"), dataset_dict.get("train")
 
 # 映射函数
 def map_function(tokenizer: PreTrainedTokenizerFast, samples: dict) -> BatchEncoding:
@@ -280,6 +259,8 @@ def load_model() -> PreTrainedModel:
         local_files_only = True,
         trust_remote_code = True,
         ignore_mismatched_sizes = True,
+        torch_dtype = torch.bfloat16,
+        attn_implementation = "flash_attention_2",
     ).to("cuda" if torch.cuda.is_available() else "cpu")
 
 # 打印模型的参数量
@@ -299,22 +280,29 @@ def print_model_parameters(model: PreTrainedModel) -> None:
     print("")
 
 # 开始训练
-def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, dataset_train_tokenized: Dataset) -> None:
+def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, eval_dataset: Dataset, train_dataset: Dataset) -> None:
     training_args = TrainingArguments(
-        optim = "ademamix_8bit",
+        # 输出
         report_to = "wandb",
         output_dir = OUTPUT_PATH,
+        logging_dir = "logs",
+        logging_steps = LOG_STEPS,
+        eval_steps = INTERVAL_STEPS,
+        save_steps = INTERVAL_STEPS,
+        eval_strategy = "steps",
+        save_strategy = "steps",
+        save_total_limit = SAVE_TOTAL_LIMIT,
+
+        # 训练
+        bf16 = True,
+        bf16_full_eval = True,
+        optim = "ademamix_8bit",
         warmup_ratio = 0.1,
         weight_decay = 0.01,
         learning_rate = LEARNING_RATE,
-        logging_dir = "logs",
-        logging_steps = INTERVAL_STEPS / 10,
-        eval_strategy = "no",
-        save_strategy = "steps",
-        save_steps = INTERVAL_STEPS,
-        save_total_limit = 3,
         num_train_epochs = EPOCHS,
-        bf16 = True,
+        lr_scheduler_type = "cosine",
+        per_device_eval_batch_size = EVAL_SIZE,
         per_device_train_batch_size = BATCH_SIZE,
         gradient_checkpointing = GRADIENT_CHECKPOINTING,
         gradient_accumulation_steps = max(1, int(GRADIENT_ACCUMULATION_SIZE / BATCH_SIZE)),
@@ -329,9 +317,10 @@ def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, d
         data_collator = DataCollatorForWholeWordMask(
             tokenizer = tokenizer,
             mlm = True,
-            mlm_probability = 0.15
+            mlm_probability = 0.30
         ),
-        train_dataset = dataset_train_tokenized,
+        eval_dataset = eval_dataset,
+        train_dataset = train_dataset,
         processing_class = tokenizer,
     )
 
@@ -353,10 +342,13 @@ def main() -> None:
     tokenizer = load_tokenizer()
 
     # 加载数据集
-    dataset_train_tokenized = load_dataset(tokenizer)
+    eval_dataset, train_dataset = load_dataset(tokenizer)
 
     # 加载模型
     model = load_model()
+
+    # 调整 token_embeddings 的大小
+    model.resize_token_embeddings(len(tokenizer))
 
     # 打印模型的参数量
     print_model_parameters(model)
@@ -368,7 +360,7 @@ def main() -> None:
     )
 
     # 开始训练
-    start_training(model, tokenizer, dataset_train_tokenized)
+    start_training(model, tokenizer, eval_dataset, train_dataset)
 
 # 主函数
 if __name__ == "__main__":
