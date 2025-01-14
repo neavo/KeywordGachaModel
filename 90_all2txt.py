@@ -9,11 +9,11 @@ from ebooklib import epub
 from bs4 import BeautifulSoup
 
 # 参数
-PATH = "dataset/pretrain/韩文轻小说"
+PATH = "dataset/pt/ko_web"
 
 # 加载文件
 def load_from_file(path: str) -> None:
-    for root, dirs, files in os.walk(path):
+    for root, _, files in os.walk(path):
         # 从 json 文件加载数据
         for file in tqdm([file for file in files if file.endswith(".json")], desc = f"{root}"):
             load_from_json_file(root, file)
@@ -44,18 +44,21 @@ def load_from_epub_file(root: str, file: str) -> None:
 
 # 从 json 文件加载数据
 def load_from_json_file(root: str, file: str) -> None:
-    inputs = {}
+    try:
+        inputs = {}
 
-    # 读取文件
-    with open(f"{root}/{file}", "r", encoding = "utf-8") as reader:
-        inputs = json.load(reader)
+        # 读取文件
+        with open(f"{root}/{file}", "r", encoding = "utf-8") as reader:
+            inputs = json.load(reader)
 
-    # 创建输出文件夹
-    os.makedirs(f"{root}/output/", exist_ok = True)
+        # 创建输出文件夹
+        os.makedirs(f"{root}/output/", exist_ok = True)
 
-    # 写入文件
-    with open(f"{root}/output/{file}".replace(".json", ".txt"), "w", encoding = "utf-8") as writer:
-        writer.write("\n".join([v.strip() for v in inputs.values() if v.strip() != ""]))
+        # 写入文件
+        with open(f"{root}/output/{file}".replace(".json", ".txt"), "w", encoding = "utf-8") as writer:
+            writer.write("\n".join([v.strip() for v in inputs.values() if v.strip() != ""]))
+    except Exception as e:
+        print(f"{e}")
 
 # 主函数
 def main() -> None:

@@ -1,3 +1,4 @@
+import os
 import re
 import json
 import random
@@ -17,6 +18,7 @@ from transformers import EvalPrediction
 from transformers import PreTrainedModel
 from transformers import AutoModelForTokenClassification
 from transformers import DataCollatorForTokenClassification
+from transformers.utils import is_torch_bf16_gpu_available
 from transformers.tokenization_utils_base import BatchEncoding
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
@@ -26,22 +28,25 @@ from seqeval.metrics import accuracy_score
 from seqeval.metrics import precision_score
 from seqeval.metrics import classification_report
 
-from model.NERTrainerCallback import NERTrainerCallback
+from callback.NERTrainerCallback import NERTrainerCallback
 
 # 模型
-MODEL_NAME = "modern_bert"
+MODEL_NAME = "modern_bert_multilingual_ds_pt_kg"
 MODEL_PATH = f"assets/{MODEL_NAME}"
 OUTPUT_PATH = "output"
+ATTN_IMPLEMENTATION = "flash_attention_2" # sdpa, flash_attention_2, eager
 
 # 训练
-EPOCHS = 100
-PATIENCE = 100
-PATIENCE_KEEPER = 0
-EVAL_SIZE = 256
+SEED = 42
+COMPILE = True
+EPOCHS = 16
+PATIENCE = 8
+EVAL_SIZE = 128
 BATCH_SIZE = 32
 GRADIENT_CHECKPOINTING = False
 GRADIENT_ACCUMULATION_SIZE = 0
 FROZEN_LAYER = 0
+WEIGHT_DECAY = 1 * 1e-2
 LEARNING_RATE = 5 * 1e-5
 
 # 输出
@@ -49,64 +54,80 @@ LOG_STEPS = 5
 INTERVAL_STEPS = 100
 
 # 数据
-DO_LOWER_CASE = False
+EVAL_DATA = 4096
 DATASET_PATH = [
-    ("dataset/ner/zh_1.json", 99 * 10000),
-    ("dataset/ner/en_1.json", 99 * 10000),
-    ("dataset/ner/jp_1.json", 99 * 10000),
-    ("dataset/ner/ko_1.json", 99 * 10000),
+    ("dataset/ner/zh", 2 * 10000 + EVAL_DATA / 4),
+    ("dataset/ner/en", 2 * 10000 + EVAL_DATA / 4),
+    ("dataset/ner/jp", 2 * 10000 + EVAL_DATA / 4),
+    ("dataset/ner/ko", 2 * 10000 + EVAL_DATA / 4),
 ]
 
 # 加载模型
 def load_model(id2label: dict, label2id: dict) -> PreTrainedModel:
-    config = AutoConfig.from_pretrained(MODEL_PATH)
+    config = AutoConfig.from_pretrained(
+        MODEL_PATH,
+        local_files_only = True,
+        trust_remote_code = True,
+    )
     config.id2label = id2label
     config.label2id = label2id
     config.num_labels = len(id2label)
 
-    if "modern" in MODEL_NAME:
-        return AutoModelForTokenClassification.from_pretrained(
-            MODEL_PATH,
-            config = config,
-            local_files_only = True,
-            trust_remote_code = True,
-            ignore_mismatched_sizes = True,
-            torch_dtype = torch.bfloat16,
-            attn_implementation = "flash_attention_2",
-        ).to("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        return AutoModelForTokenClassification.from_pretrained(
-            MODEL_PATH,
-            config = config,
-            local_files_only = True,
-            trust_remote_code = True,
-            ignore_mismatched_sizes = True,
-            torch_dtype = torch.bfloat16,
-        ).to("cuda" if torch.cuda.is_available() else "cpu")
+    return AutoModelForTokenClassification.from_pretrained(
+        MODEL_PATH,
+        config = config,
+        local_files_only = True,
+        trust_remote_code = True,
+        ignore_mismatched_sizes = True,
+        torch_dtype = torch.bfloat16 if is_torch_bf16_gpu_available() == True else torch.float16,
+        attn_implementation = ATTN_IMPLEMENTATION,
+    ).to("cuda" if torch.cuda.is_available() else "cpu")
 
 # 加载分词器
 def load_tokenizer() -> PreTrainedTokenizerFast:
-    if any(v in MODEL_NAME for v in ("bloom", "gpt2", "roberta", "deberta")):
-        return AutoTokenizer.from_pretrained(
-            MODEL_PATH,
-            do_lower_case = DO_LOWER_CASE,
-            add_prefix_space = True,
-            local_files_only = True,
-        )
+    return AutoTokenizer.from_pretrained(
+        MODEL_PATH,
+        do_lower_case = False,
+        local_files_only = True,
+    )
+
+# 随机取样，如果数量充足，则尽可能平衡类型
+def sample(data: list[dict], limit: int) -> list[dict]:
+    # 找出最大的类型
+    type_count = {}
+    for item in data:
+        for entity in item.get("entities", []):
+            type_count[entity.get("entity_type")] = type_count.get(entity.get("entity_type"), 0) + 1
+    max_k = max(type_count, key = lambda k: type_count.get(k), default="")
+
+    # 拆分数据
+    data_x = [item for item in data if any(entity.get("entity_type") != max_k for entity in item.get("entities", []))]
+    data_y = [item for item in data if not any(entity.get("entity_type") != max_k for entity in item.get("entities", []))]
+
+    # 随机取样
+    if len(data_x) >= limit:
+        return random.sample(data_x, limit)
     else:
-        return AutoTokenizer.from_pretrained(
-            MODEL_PATH,
-            do_lower_case = DO_LOWER_CASE,
-            local_files_only = True,
-        )
+        return random.sample(data_x, len(data_x)) + random.sample(data_y, min(len(data_y), limit - len(data_x)))
 
 # 加载数据集
 def load_dataset(tokenizer: PreTrainedTokenizerFast) -> tuple[Dataset, Dataset, dict, dict]:
     data = []
-    for path, num in DATASET_PATH:
-        with open(path, "r", encoding = "utf-8") as file:
-            data_ex = json.load(file)
-            data.extend(random.sample(data_ex, min(int(num), len(data_ex))))
+    count = 0
+    for path, limit in DATASET_PATH:
+        if os.path.isfile(path) == True:
+            data_ex = []
+            with open(path, "r", encoding = "utf-8") as file:
+                count = count + 1
+                data_ex.extend(json.load(file))
+            data.extend(sample(data_ex, int(limit)))
+        elif os.path.isdir(path) == True:
+            data_ex = []
+            for file in [file for file in os.scandir(path) if file.path.endswith(".json")]:
+                with open(file.path, "r", encoding = "utf-8") as file:
+                    count = count + 1
+                    data_ex.extend(json.load(file))
+            data.extend(sample(data_ex, int(limit)))
 
     # 只取需要的字段，避免后续转换格式时的错误
     data = [{"sentence": v.get("sentence", ""), "entities": v.get("entities", [])} for v in data]
@@ -115,8 +136,8 @@ def load_dataset(tokenizer: PreTrainedTokenizerFast) -> tuple[Dataset, Dataset, 
     types = set()
     for v in data:
         for entity in v.get("entities", []):
-            if entity["ner_type"] != "":
-                types.add(entity["ner_type"])
+            if entity.get("entity_type") != "":
+                types.add(entity.get("entity_type"))
     id2label = {0: "O"}
     for c in list(sorted(types)):
         id2label[len(id2label)] = f"B-{c}"
@@ -126,46 +147,44 @@ def load_dataset(tokenizer: PreTrainedTokenizerFast) -> tuple[Dataset, Dataset, 
     # 生成数据集
     dataset_tokenized = Dataset.from_list(data).map(
         lambda samples: load_dataset_map_function(samples, tokenizer, label2id),
-        num_proc = 1,
         batched = True,
-        batch_size = 1024,
         remove_columns = ["sentence", "entities"],
     )
 
+    # 获取最大长度
+    max_length = max(len(v.get("input_ids")) for v in dataset_tokenized)
+
     # 拆分数据集
     dataset_dict = dataset_tokenized.train_test_split(
-        seed = 42,
+        seed = SEED,
         shuffle = True,
-        test_size = 2048,
-        keep_in_memory = True,
-        load_from_cache_file = False,
+        test_size = EVAL_DATA,
     )
-
     eval_dataset, train_dataset = dataset_dict.get("test"), dataset_dict.get("train")
 
     print("")
     print("数据加载已完成 ... 样本如下：")
     print("")
-    print_dataset_sample(dataset_tokenized, id2label)
+    print_dataset_sample(tokenizer, dataset_tokenized, id2label)
     print("")
-    print(f"加载数据文件 {len(DATASET_PATH)} 个，共 {len(data)} 条数据 ...")
-    print(f"测试集 {len(eval_dataset)} 条数据，其中最大长度为 {max(len(v.get("input_ids")) for v in eval_dataset)} ...")
-    print(f"训练集 {len(train_dataset)} 条数据，其中最大长度为 {max(len(v.get("input_ids")) for v in train_dataset)} ...")
+    print(f"加载数据文件 {count} 个，共 {len(data)} 条数据，最大长度为 {max_length} ...")
 
-    return eval_dataset, train_dataset, id2label, label2id
+    return eval_dataset, train_dataset, id2label, label2id, max_length
 
 # 打印数据集样本
-def print_dataset_sample(dateset: Dataset, id2label: dict) -> None:
+def print_dataset_sample(tokenizer: PreTrainedTokenizerFast, dateset: Dataset, id2label: dict) -> None:
     if len(dateset) == 0:
         return
 
     labels = dateset[0].get("labels")
     input_ids = dateset[0].get("input_ids")
-    input_tokens = dateset[0].get("input_tokens")
+    input_tokens = tokenizer.batch_decode(input_ids)
+    attention_mask = dateset[0].get("attention_mask")
+    special_tokens_mask = dateset[0].get("special_tokens_mask")
 
-    print(f"{"input_tokens":<8}\t\t{"labels":<4}\t\t{"input_ids":<4}")
-    for x, y, z in zip(input_tokens, labels, input_ids):
-        print(f"{x:<8}\t\t{id2label.get(y):<4}\t\t{z:<4}")
+    print(f"{"tokens":<8}\t\t{"labels":<4}\t\t{"ids":<4}\t\t{"attention":<8}\t\t{"special_mask":<6}")
+    for x, y, z, a, b in zip(input_tokens, labels, input_ids, attention_mask, special_tokens_mask):
+        print(f"{x:<8}\t\t{id2label.get(y):<4}\t\t{z:<4}\t\t{a:<8}\t\t{b:<6}")
 
 # 数据集映射函数
 def load_dataset_map_function(samples: dict, tokenizer: PreTrainedTokenizerFast, label2id: dict) -> BatchEncoding:
@@ -177,11 +196,11 @@ def load_dataset_map_function(samples: dict, tokenizer: PreTrainedTokenizerFast,
     )
 
     # 生成 input_tokens
-    encodings["input_tokens"] = []
-    for tokens in [tokenizer.convert_ids_to_tokens(v) for v in encodings.input_ids]:
-        encodings["input_tokens"].append([])
-        for t in tokens:
-            encodings["input_tokens"][-1].append(tokenizer.convert_tokens_to_string([t]))
+    # encodings["input_tokens"] = []
+    # for tokens in [tokenizer.convert_ids_to_tokens(v) for v in encodings.get("input_ids")]:
+    #     encodings["input_tokens"].append([])
+    #     for t in tokens:
+    #         encodings["input_tokens"][-1].append(tokenizer.convert_tokens_to_string([t]))
 
     # 生成 labels
     for i, _ in enumerate(encodings.get("input_ids")):
@@ -193,27 +212,15 @@ def load_dataset_map_function(samples: dict, tokenizer: PreTrainedTokenizerFast,
         # 遍历实体词语
         result = []
         for entity in entities:
-            name = entity.get("name", "")
-            ner_type = entity.get("ner_type", "")
+            surface = entity.get("surface", "")
+            entity_type = entity.get("entity_type", "")
 
             # 获取实体词语在字符串中的位置
-            char_start = sentence.find(name)
-            char_end = char_start + len(name)
-
-            # 检查实体是否在字符串中
-            # if char_start < 0:
-            #     print(
-            #         (
-            #             "\n"
-            #             + f"{name}" + "\n"
-            #             + "[green]-->[/]"
-            #             + f"{sentence}" + "\n"
-            #             + "\n"
-            #         )
-            #     )
+            char_start = sentence.find(surface)
+            char_end = char_start + len(surface)
 
             # 有效性检查
-            if char_start < 0 or name == "" or ner_type == "":
+            if char_start < 0 or surface == "" or entity_type == "":
                 continue
 
             # 通过字符位置反查 Token 位置
@@ -223,7 +230,7 @@ def load_dataset_map_function(samples: dict, tokenizer: PreTrainedTokenizerFast,
             if token_start == -1 or token_end == -1:
                 continue
 
-            result.append((token_start, token_end, ner_type))
+            result.append((token_start, token_end, entity_type))
 
         # 生成 labels
         labels = [0 for _ in range(len(input_ids))]
@@ -323,20 +330,27 @@ def compute_metrics(eval_prediction: EvalPrediction, id2label: dict) -> dict:
     ]
 
     return {
-        "f1": f1_score(true_labels, true_predictions, mode = "strict", average = "weighted", zero_division = 0),
-        "recall": recall_score(true_labels, true_predictions, mode = "strict", average = "weighted", zero_division = 0),
+        "f1": f1_score(true_labels, true_predictions, average = "micro", zero_division = 0),
+        "recall": recall_score(true_labels, true_predictions, average = "micro", zero_division = 0),
         "accuracy": accuracy_score(true_labels, true_predictions),
-        "precision": precision_score(true_labels, true_predictions, mode = "strict", average = "weighted", zero_division = 0),
-        "classification_report": classification_report(true_labels, true_predictions, mode = "strict", output_dict = True, zero_division = 0)
+        "precision": precision_score(true_labels, true_predictions, average = "micro", zero_division = 0),
+        "classification_report": classification_report(true_labels, true_predictions, output_dict = True, zero_division = 0)
     }
 
 # 开始训练
-def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, eval_dataset: Dataset, train_dataset: Dataset) -> None:
+def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, eval_dataset: Dataset, train_dataset: Dataset, max_length: int) -> None:
+    # Graph break from `Tensor.item()`, consider setting:
+    # torch._dynamo.config.capture_scalar_outputs = True
+    # or:
+    # env TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS=1
+    # to include these operations in the captured graph.
+    if COMPILE == True:
+        torch._dynamo.config.capture_scalar_outputs = True
+
     training_args = TrainingArguments(
         # 输出
         report_to = "wandb",
         output_dir = OUTPUT_PATH,
-        logging_dir = "logs",
         logging_steps = LOG_STEPS,
         eval_steps = INTERVAL_STEPS,
         save_steps = INTERVAL_STEPS,
@@ -344,34 +358,28 @@ def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, e
         save_strategy = "no",
 
         # 训练
+        torch_compile = COMPILE,
         bf16 = True,
         bf16_full_eval = True,
-        # optim = "ademamix_8bit",
-        optim = "ademamix",
+        optim = "paged_adamw_32bit",
         warmup_ratio = 0.1,
-        weight_decay = 0.01,
+        weight_decay = WEIGHT_DECAY,
         learning_rate = LEARNING_RATE,
         num_train_epochs = EPOCHS,
         lr_scheduler_type = "cosine",
         per_device_eval_batch_size = EVAL_SIZE,
         per_device_train_batch_size = BATCH_SIZE,
         gradient_checkpointing = GRADIENT_CHECKPOINTING,
-        gradient_accumulation_steps = max(1, int(GRADIENT_ACCUMULATION_SIZE / BATCH_SIZE)),
-    )
-
-    callback = NERTrainerCallback(
-        model_name = MODEL_NAME,
-        patience = PATIENCE,
-        patience_keeper = PATIENCE_KEEPER,
+        gradient_accumulation_steps = int(max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE) / BATCH_SIZE),
     )
 
     trainer = Trainer(
         args = training_args,
         model = model,
-        callbacks = [callback],
         data_collator = DataCollatorForTokenClassification(
             tokenizer = tokenizer,
-            padding = "longest",
+            padding = "max_length",
+            max_length = max_length,
             pad_to_multiple_of = 8,
         ),
         eval_dataset = eval_dataset,
@@ -379,9 +387,13 @@ def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, e
         compute_metrics = lambda eval_prediction: compute_metrics(eval_prediction = eval_prediction, id2label = model.config.id2label),
         processing_class = tokenizer,
     )
-
-    # 设置回调中的 trainer 属性
-    callback.set_trainer(trainer)
+    trainer.add_callback(
+        NERTrainerCallback(
+            trainer = trainer,
+            patience = PATIENCE,
+            model_name = MODEL_NAME,
+        ),
+    )
 
     # 开始训练
     trainer.train()
@@ -389,13 +401,13 @@ def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, e
 # 主函数
 def main() -> None:
     # 固定随机种子
-    random.seed(42)
+    random.seed(SEED)
 
     # 加载分词器
     tokenizer = load_tokenizer()
 
     # 加载数据集
-    eval_dataset, train_dataset, id2label, label2id = load_dataset(tokenizer)
+    eval_dataset, train_dataset, id2label, label2id, max_length = load_dataset(tokenizer)
 
     # 加载模型
     model = load_model(id2label, label2id)
@@ -413,7 +425,7 @@ def main() -> None:
     )
 
     # 开始训练
-    start_training(model, tokenizer, eval_dataset, train_dataset)
+    start_training(model, tokenizer, eval_dataset, train_dataset, max_length)
 
 # 主函数
 if __name__ == "__main__":

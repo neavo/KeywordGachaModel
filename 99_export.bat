@@ -11,7 +11,7 @@ if "%~1"=="" (
 )
 
 @REM 执行python脚本
-call python 99.py %1
+call python 99_export.py %1
 
 :END
 pause
