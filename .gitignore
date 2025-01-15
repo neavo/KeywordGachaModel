@@ -4,9 +4,9 @@ __pycache__
 
 /logs*
 /runs*
-/cache*
 /wandb*
 /mlruns*
 /assets*
 /output*
 /dataset*
+/workspace*

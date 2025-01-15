@@ -1,0 +1,13 @@
+transformers
+torch --index-url https://download.pytorch.org/whl/cu124
+torchaudio --index-url https://download.pytorch.org/whl/cu124
+torchvision --index-url https://download.pytorch.org/whl/cu124
+flash-attn --no-build-isolation
+
+rich
+jaconv
+joblib
+triton
+datasets
+accelerate
+bitsandbytes

@@ -6,7 +6,6 @@ import unicodedata
 from typing import Generator
 from datetime import datetime
 
-import wandb
 import torch
 import jaconv
 from tqdm import tqdm
@@ -27,7 +26,6 @@ from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
 from callback.PreTrainerCallback import PreTrainerCallback
 
-
 # 模型
 SCRATCH = True
 MODEL_NAME = "modern_bert_cjk"
@@ -36,13 +34,14 @@ OUTPUT_PATH = f"output/{MODEL_NAME}_pt_e1"
 ATTN_IMPLEMENTATION = "flash_attention_2" # sdpa, flex_attention, flash_attention_2, eager
 
 # 训练
+WANDB_ENABLE = False
 SEED = 42
 WEIGHT_DECAY = 1 * 1e-5
 LEARNING_RATE = 5 * 1e-4
 EPOCHS = 1
-EVAL_SIZE = 8
-BATCH_SIZE = 24
-TORCH_COMPILE = True
+EVAL_SIZE = 16
+BATCH_SIZE = 64
+TORCH_COMPILE = False
 GRADIENT_CHECKPOINTING = True
 GRADIENT_ACCUMULATION_SIZE = 256
 
@@ -53,22 +52,24 @@ AUTO_RESUME_FROM_CHECKPOINT = True
 
 # 数据
 EVAL_DATA = 8
-LENGTH_THRESHOLD = 256
+LENGTH_THRESHOLD = 512
+WORKSPACE = "workspace"
 DATASET_PATH = [
-    # ("dataset/pt/zh", 20 * 10000),
-    # ("dataset/pt/zh_r18_pixiv", 20 * 10000),
-    # ("dataset/pt/en", 30 * 10000),
-    # ("dataset/pt/en_r18_visual_novels", 10 * 10000),
-    # ("dataset/pt/jp", 40 * 10000),
-    # ("dataset/pt/jp_r18", 32.5 * 10000),
-    # ("dataset/pt/jp_r18_rpg", 7.5 * 10000),
-    # ("dataset/pt/ko", 20 * 10000),
-    # ("dataset/pt/ko_web", 20 * 10000),
-    ("dataset/pt/zh_cc100", 800 * 10000),
-    ("dataset/pt/zh_cc100_tw", 800 * 10000),
-    ("dataset/pt/en_c4", 800 * 10000),
-    ("dataset/pt/jp_cc100", 800 * 10000),
-    ("dataset/pt/ko_cc100", 800 * 10000),
+    # ("/mnt/e/ai/dataset/pt/zh", 20 * 10000),
+    # ("/mnt/e/ai/dataset/pt/zh_r18_pixiv", 20 * 10000),
+    # ("/mnt/e/ai/dataset/pt/en", 30 * 10000),
+    # ("/mnt/e/ai/dataset/pt/en_r18_visual_novels", 10 * 10000),
+    # ("/mnt/e/ai/dataset/pt/jp", 40 * 10000),
+    # ("/mnt/e/ai/dataset/pt/jp_r18", 32.5 * 10000),
+    # ("/mnt/e/ai/dataset/pt/jp_r18_rpg", 7.5 * 10000),
+    ("/mnt/e/ai/dataset/pt/jp_r18_rpg", 5 * 10000),
+    # ("/mnt/e/ai/dataset/pt/ko", 20 * 10000),
+    # ("/mnt/e/ai/dataset/pt/ko_web", 20 * 10000),
+    # ("/mnt/e/ai/dataset/pt/zh_cc100", 800 * 10000),
+    # ("/mnt/e/ai/dataset/pt/zh_cc100_tw", 400 * 10000),
+    # ("/mnt/e/ai/dataset/pt/en_c4", 800 * 10000),
+    # ("/mnt/e/ai/dataset/pt/jp_cc100", 1200 * 10000),
+    # ("/mnt/e/ai/dataset/pt/ko_cc100", 800 * 10000),
 ]
 
 # 加载模型
@@ -178,58 +179,63 @@ def lines_generator(path: str, batch_size: int, flag: dict) -> Generator[list, a
 def datas_generator(tokenizer: PreTrainedTokenizerFast, lines: list[str], path: str) -> list[str]:
     lines = [cleanup(line, path) for line in lines]
 
-    datas = []
+    # 获取特殊 Token 的数量
+    special_tokens_num = tokenizer.num_special_tokens_to_add(pair = False)
+
+    # 计算文本的编码
     encodings = tokenizer(
         lines,
         padding = False,
         truncation = True,
-        max_length = LENGTH_THRESHOLD + 8, # 加一些冗余，避免加上特殊 Token 以后长度刚刚好的情况
-        return_special_tokens_mask = True,
+        max_length = LENGTH_THRESHOLD + special_tokens_num, # 加上冗余长度，加上特殊 Token 以后长度刚刚好的情况
     )
 
     # 计算文本的长度，此处只统计实际有效的 Token 数量
     datas = [
         {
             "line": line,
-            "length": special_tokens_mask.count(0),
+            "length": len(input_ids) - special_tokens_num,
         }
-        for line, special_tokens_mask in zip(lines, encodings.get("special_tokens_mask"))
+        for line, input_ids in zip(lines, encodings.get("input_ids"))
     ]
 
     return datas
 
 # 生成数据块
 def chunks_generator(tokenizer: PreTrainedTokenizerFast, lines: list[str], path: str) -> list[list[str]]:
-    chunks = []
+    result: list[str] = []
     datas = datas_generator(tokenizer, lines, path)
 
-    chunk = ""
+    # 获取特殊 Token 的数量
+    special_tokens_num = tokenizer.num_special_tokens_to_add(pair = False)
+
+    # 遍历数据，将数据分段
+    chunk: str = ""
     chunk_length = 0
     for data in datas:
         line = data.get("line")
         length = data.get("length")
 
-        # 计算片段的长度，如果会超过阈值则分割
-        # Tokenizer 一般会在首尾各加入一个特殊 Token，所以此处预留 2 个冗余位置
-        if chunk_length + length >= LENGTH_THRESHOLD - 2:
-            # 去除重复空格并存储当前chunk
-            chunks.append(re.sub(r" +", " ", f"{chunk} {line}").strip())
+        # 拼接片段
+        if len(chunk) == 0:
+            chunk = line
+            chunk_length = length
+        else:
+            chunk = f"{chunk} {line}"
+            chunk_length = chunk_length + length + 1
 
-            # 重置片段
+        # 计算片段的 Token 长度，如果超过阈值，则添加到结果中并开始新的分段
+        # Tokenizer 会在收尾加入特殊 Token，文本之间还会有一个连接符，所以要减去这些长度
+        if chunk_length >= LENGTH_THRESHOLD - special_tokens_num - 1:
+            result.append(chunk)
             chunk = ""
             chunk_length = 0
-        else:
-            # 如果当前片段未超过阈值，继续拼接
-            chunk = chunk + " " + line
 
-            # 空格算不算 Token 都有可能，保险起见按计入计算，即长度 +1
-            chunk_length = chunk_length + 1 + length
+     # 最后一个片段如果非空且有一定长度，则添加到结果
+    if chunk.strip() != "" and chunk_length > (LENGTH_THRESHOLD - special_tokens_num - 1) * 0.8:
+        result.append(chunk)
 
-     # 最后一个片段如果非空，则添加
-    if chunk.strip() != "":
-        chunks.append(re.sub(r" +", " ", f"{chunk} {line}").strip())
-
-    return chunks
+    return result
 
 # 准备语料
 def generate_text_file(path: str, output: str, tokenizer: PreTrainedTokenizerFast, threshold: int) -> None:
@@ -239,22 +245,22 @@ def generate_text_file(path: str, output: str, tokenizer: PreTrainedTokenizerFas
     }
 
     # 并行处理数据分段进行
-    data = []
     with Parallel(n_jobs = os.cpu_count(), prefer = "processes", return_as = "generator_unordered") as parallel:
         results = parallel(
-            delayed(chunks_generator)(tokenizer, lines, path) for lines in lines_generator(path, 32 * 1024, flag)
+            delayed(chunks_generator)(tokenizer, lines, path) for lines in lines_generator(path, 32 * 1000, flag)
         )
+
+        # 处理结果
+        data = []
         for result in results:
             data.extend(result)
-            flag["current"] = len(data)
-            if len(data) >= threshold:
-                flag["stop"] = True
+            flag["stop"] = len(data) >= threshold
 
     # 按阈值随机取数据
     if threshold <= len(data):
         data = random.sample(data, int(threshold))
     else:
-        print(f"{path}: 数据量不足，将重复数据以满足需求，{len(data)} -> {threshold} ...")
+        print(f"{path}: 数据量不足，将重复数据以满足需求，{len(data)} -> {int(threshold)} ...")
         data = data + random.sample(data, int(threshold - len(data)))
 
     # 按阈值随机取数据，然后写入文件
@@ -268,20 +274,17 @@ def load_dataset(tokenizer: PreTrainedTokenizerFast) -> tuple[Dataset, Dataset]:
     print("正在加载数据集 ...")
     print("")
 
-    # 加载或者生成数据集
-    cache_path = "dataset/pt/cache"
-    os.makedirs(cache_path, exist_ok = True)
-    if not os.path.isdir(f"{cache_path}/{MODEL_NAME}_tokenized"):
+    # 如果数据集不存在，则生成数据集
+    os.makedirs(f"{WORKSPACE}/cache", exist_ok = True)
+    if not os.path.isdir(f"{WORKSPACE}/{MODEL_NAME}_tokenized"):
         # 遍历数据集路径
         paths = []
         for path, threshold in DATASET_PATH:
-            dir_path, dir_name = os.path.split(path)
+            _, dir_name = os.path.split(path)
 
             # 如果数据文本文件不存在，则生成
-            output = f"{dir_path}/{MODEL_NAME}_{dir_name}.txt"
-            if os.path.isfile(output) == True:
-                pass
-            else:
+            output = f"{WORKSPACE}/{MODEL_NAME}_{dir_name}.txt"
+            if os.path.isfile(output) == False:
                 generate_text_file(path, output, tokenizer, threshold)
 
             # 记录路径
@@ -289,37 +292,36 @@ def load_dataset(tokenizer: PreTrainedTokenizerFast) -> tuple[Dataset, Dataset]:
 
         dataset_tokenized = Dataset.from_text(
             paths,
-            cache_dir = cache_path
+            cache_dir = f"{WORKSPACE}/cache"
         ).map(
             lambda samples: load_dataset_map_function(samples, tokenizer),
             num_proc = os.cpu_count(),
             batched = True,
             remove_columns = ["text"],
-            cache_file_name = f"{cache_path}/map/{MODEL_NAME}.cache",
+            cache_file_name = f"{WORKSPACE}/cache/map/{MODEL_NAME}.cache",
             load_from_cache_file = True,
         )
         dataset_tokenized.save_to_disk(
-            dataset_path = f"{cache_path}/{MODEL_NAME}_tokenized",
+            dataset_path = f"{WORKSPACE}/{MODEL_NAME}_tokenized",
             num_proc = os.cpu_count(),
             max_shard_size = "4GB",
         )
-        shutil.rmtree(f"{cache_path}/map", ignore_errors = True)
-        shutil.rmtree(f"{cache_path}/text", ignore_errors = True)
-        [os.remove(file.path) for file in os.scandir(f"{cache_path}") if file.name.endswith(".lock")]
-    dataset_tokenized = Dataset.load_from_disk(f"{cache_path}/{MODEL_NAME}_tokenized")
+
+    # 清理缓存并加载数据集
+    shutil.rmtree(f"{WORKSPACE}/cache", ignore_errors = True)
+    dataset_tokenized = Dataset.load_from_disk(f"{WORKSPACE}/{MODEL_NAME}_tokenized")
 
     # 统计数据
-    max_length = max(dataset_tokenized["attention_length"])
-    total_length = sum(dataset_tokenized["attention_length"])
+    max_length = max(dataset_tokenized["length"])
+    total_length = sum(dataset_tokenized["length"])
 
     # 拆分数据集
-    [os.remove(file.path) for file in os.scandir(f"{cache_path}") if file.name.endswith("_indices.cache")]
     dataset_dict = dataset_tokenized.train_test_split(
         seed = SEED,
         shuffle = True,
         test_size = EVAL_DATA,
-        test_indices_cache_file_name = f"{cache_path}/{MODEL_NAME}_eval_indices.cache",
-        train_indices_cache_file_name = f"{cache_path}/{MODEL_NAME}_train_indices.cache",
+        test_indices_cache_file_name = f"{WORKSPACE}/cache/{MODEL_NAME}_eval_indices.cache",
+        train_indices_cache_file_name = f"{WORKSPACE}/cache/{MODEL_NAME}_train_indices.cache",
     )
     eval_dataset, train_dataset = dataset_dict.get("test"), dataset_dict.get("train")
 
@@ -354,7 +356,7 @@ def load_dataset_map_function(samples: dict, tokenizer: PreTrainedTokenizerFast)
     #         encodings["input_tokens"][-1].append(tokenizer.convert_tokens_to_string([t]))
 
     # 计算有效的 Token 数量
-    encodings["attention_length"] = [item.count(1) for item in encodings.get("attention_mask")]
+    encodings["length"] = [item.count(0) for item in encodings.get("special_tokens_mask")]
 
     return encodings
 
@@ -399,7 +401,7 @@ def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, e
 
     training_args = TrainingArguments(
         # 输出
-        report_to = "wandb",
+        report_to = "wandb" if WANDB_ENABLE == True else "none",
         output_dir = OUTPUT_PATH,
         logging_steps = LOG_STEPS,
         eval_steps = INTERVAL_STEPS,
@@ -480,10 +482,12 @@ def main() -> None:
     print_model_parameters(model)
 
     # 设置 wandb
-    wandb.init(
-        project = "PT",
-        name = f"{MODEL_NAME}_{datetime.now().strftime("%Y%m%d_%H%M%S")}",
-    )
+    if WANDB_ENABLE == True:
+        import wandb
+        wandb.init(
+            project = "PT",
+            name = f"{MODEL_NAME}_{datetime.now().strftime("%Y%m%d_%H%M%S")}",
+        )
 
     # 开始训练
     start_training(model, tokenizer, eval_dataset, train_dataset)
