@@ -5,9 +5,11 @@ torchvision --index-url https://download.pytorch.org/whl/cu124
 flash-attn --no-build-isolation
 
 rich
-jaconv
+openai
 joblib
 triton
+seqeval
 datasets
 accelerate
+aiolimiter
 bitsandbytes

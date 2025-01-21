@@ -7,7 +7,6 @@ from datetime import datetime
 from rich import print
 
 import numpy
-import wandb
 import torch
 from datasets import Dataset
 from transformers import Trainer
@@ -18,7 +17,6 @@ from transformers import EvalPrediction
 from transformers import PreTrainedModel
 from transformers import AutoModelForTokenClassification
 from transformers import DataCollatorForTokenClassification
-from transformers.utils import is_torch_bf16_gpu_available
 from transformers.tokenization_utils_base import BatchEncoding
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
@@ -28,38 +26,45 @@ from seqeval.metrics import accuracy_score
 from seqeval.metrics import precision_score
 from seqeval.metrics import classification_report
 
+from callback.LRSearchCallback import LRSearchCallback
 from callback.NERTrainerCallback import NERTrainerCallback
 
+# 任务
+LR_SEARCH = False
+WANDB_ENABLE = True
+
 # 模型
-MODEL_NAME = "modern_bert_multilingual_ds_pt_kg"
+MODEL_NAME = "facebookai_xlm_roberta_base_pt_20250118"
 MODEL_PATH = f"assets/{MODEL_NAME}"
 OUTPUT_PATH = "output"
-ATTN_IMPLEMENTATION = "flash_attention_2" # sdpa, flash_attention_2, eager
+ATTN_IMPLEMENTATION = "sdpa" # sdpa, flash_attention_2, eager
 
 # 训练
 SEED = 42
-COMPILE = True
-EPOCHS = 16
-PATIENCE = 8
+PATIENCE = 999
+OPTIMIZER = "adamw_torch" # adamw_torch, adamw_torch_fused, paged_adamw_8bit, paged_lion_8bit, paged_ademamix_8bit
+MAX_STEPS = 12500
 EVAL_SIZE = 128
 BATCH_SIZE = 32
-GRADIENT_CHECKPOINTING = False
-GRADIENT_ACCUMULATION_SIZE = 0
+TORCH_COMPILE = True
 FROZEN_LAYER = 0
 WEIGHT_DECAY = 1 * 1e-2
-LEARNING_RATE = 5 * 1e-5
+LEARNING_RATE = 8 * 1e-6
+GRADIENT_CHECKPOINTING = False
+GRADIENT_ACCUMULATION_SIZE = 0
 
 # 输出
-LOG_STEPS = 5
-INTERVAL_STEPS = 100
+SAVE_STEPS = 0
+EVAL_STEPS = 300
+LOGGING_STEPS = 5
 
 # 数据
 EVAL_DATA = 4096
 DATASET_PATH = [
-    ("dataset/ner/zh", 2 * 10000 + EVAL_DATA / 4),
-    ("dataset/ner/en", 2 * 10000 + EVAL_DATA / 4),
-    ("dataset/ner/jp", 2 * 10000 + EVAL_DATA / 4),
-    ("dataset/ner/ko", 2 * 10000 + EVAL_DATA / 4),
+    ("/mnt/e/ai/dataset/ner/zh", 2 * 10000 + EVAL_DATA / 4),
+    ("/mnt/e/ai/dataset/ner/en", 2 * 10000 + EVAL_DATA / 4),
+    ("/mnt/e/ai/dataset/ner/jp", 2 * 10000 + EVAL_DATA / 4),
+    ("/mnt/e/ai/dataset/ner/ko", 2 * 10000 + EVAL_DATA / 4),
 ]
 
 # 加载模型
@@ -79,7 +84,6 @@ def load_model(id2label: dict, label2id: dict) -> PreTrainedModel:
         local_files_only = True,
         trust_remote_code = True,
         ignore_mismatched_sizes = True,
-        torch_dtype = torch.bfloat16 if is_torch_bf16_gpu_available() == True else torch.float16,
         attn_implementation = ATTN_IMPLEMENTATION,
     ).to("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -149,6 +153,7 @@ def load_dataset(tokenizer: PreTrainedTokenizerFast) -> tuple[Dataset, Dataset, 
         lambda samples: load_dataset_map_function(samples, tokenizer, label2id),
         batched = True,
         remove_columns = ["sentence", "entities"],
+        keep_in_memory = True
     )
 
     # 获取最大长度
@@ -194,13 +199,6 @@ def load_dataset_map_function(samples: dict, tokenizer: PreTrainedTokenizerFast,
         return_offsets_mapping = True,
         return_special_tokens_mask = True,
     )
-
-    # 生成 input_tokens
-    # encodings["input_tokens"] = []
-    # for tokens in [tokenizer.convert_ids_to_tokens(v) for v in encodings.get("input_ids")]:
-    #     encodings["input_tokens"].append([])
-    #     for t in tokens:
-    #         encodings["input_tokens"][-1].append(tokenizer.convert_tokens_to_string([t]))
 
     # 生成 labels
     for i, _ in enumerate(encodings.get("input_ids")):
@@ -339,34 +337,30 @@ def compute_metrics(eval_prediction: EvalPrediction, id2label: dict) -> dict:
 
 # 开始训练
 def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, eval_dataset: Dataset, train_dataset: Dataset, max_length: int) -> None:
-    # Graph break from `Tensor.item()`, consider setting:
-    # torch._dynamo.config.capture_scalar_outputs = True
-    # or:
-    # env TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS=1
-    # to include these operations in the captured graph.
-    if COMPILE == True:
-        torch._dynamo.config.capture_scalar_outputs = True
-
     training_args = TrainingArguments(
         # 输出
-        report_to = "wandb",
+        report_to = "wandb" if WANDB_ENABLE == True else "none",
         output_dir = OUTPUT_PATH,
-        logging_steps = LOG_STEPS,
-        eval_steps = INTERVAL_STEPS,
-        save_steps = INTERVAL_STEPS,
-        eval_strategy = "steps",
-        save_strategy = "no",
+        eval_steps = EVAL_STEPS,
+        save_steps = SAVE_STEPS,
+        logging_steps = LOGGING_STEPS,
+        eval_strategy = "steps" if EVAL_STEPS != None and EVAL_STEPS > 0 else "no",
+        save_strategy = "steps" if SAVE_STEPS != None and SAVE_STEPS > 0 else "no",
+        logging_strategy = "steps" if LOGGING_STEPS != None and LOGGING_STEPS > 0 else "no",
 
         # 训练
-        torch_compile = COMPILE,
+        torch_compile = TORCH_COMPILE,
         bf16 = True,
-        bf16_full_eval = True,
-        optim = "paged_adamw_32bit",
-        warmup_ratio = 0.1,
+        optim = OPTIMIZER,
+        warmup_ratio = 0.10,
         weight_decay = WEIGHT_DECAY,
         learning_rate = LEARNING_RATE,
-        num_train_epochs = EPOCHS,
-        lr_scheduler_type = "cosine",
+        max_steps = MAX_STEPS,
+        lr_scheduler_type = "warmup_stable_decay",
+        lr_scheduler_kwargs = {
+            "num_decay_steps": int(MAX_STEPS * 0.10) + 1,
+            "num_stable_steps": int(MAX_STEPS * 0.80) + 1,
+        },
         per_device_eval_batch_size = EVAL_SIZE,
         per_device_train_batch_size = BATCH_SIZE,
         gradient_checkpointing = GRADIENT_CHECKPOINTING,
@@ -398,6 +392,50 @@ def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, e
     # 开始训练
     trainer.train()
 
+def start_lr_search(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, eval_dataset: Dataset, train_dataset: Dataset, max_length: int) -> None:
+
+    training_args = TrainingArguments(
+        # 输出
+        report_to = "wandb" if WANDB_ENABLE == True else "none",
+        output_dir = OUTPUT_PATH,
+        logging_steps = 1,
+        eval_strategy = "no",
+        save_strategy = "no",
+        logging_strategy = "steps",
+
+        # 训练
+        torch_compile = TORCH_COMPILE,
+        bf16 = True,
+        optim = OPTIMIZER,
+        warmup_ratio = 0.10,
+        weight_decay = 0.00,
+        learning_rate = 1e-7,
+        lr_scheduler_type = "constant",
+        max_steps = MAX_STEPS,
+        per_device_train_batch_size = BATCH_SIZE,
+        gradient_checkpointing = GRADIENT_CHECKPOINTING,
+        gradient_accumulation_steps = int(max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE) / BATCH_SIZE),
+    )
+
+    trainer = Trainer(
+        args = training_args,
+        model = model,
+        data_collator = DataCollatorForTokenClassification(
+            tokenizer = tokenizer,
+            padding = "max_length",
+            max_length = max_length,
+            pad_to_multiple_of = 8,
+        ),
+        train_dataset = train_dataset,
+        compute_metrics = lambda eval_prediction: compute_metrics(eval_prediction = eval_prediction, id2label = model.config.id2label),
+        processing_class = tokenizer,
+    )
+
+    trainer.add_callback(LRSearchCallback(
+        trainer = trainer,
+    ))
+    trainer.train()
+
 # 主函数
 def main() -> None:
     # 固定随机种子
@@ -419,13 +457,21 @@ def main() -> None:
     print_model_parameters(model)
 
     # 设置 wandb
-    wandb.init(
-        project = "NER",
-        name = f"{MODEL_NAME}_{datetime.now().strftime("%Y%m%d_%H%M%S")}",
-    )
+    if WANDB_ENABLE == True:
+        import wandb
+        wandb.init(
+            project = "NER",
+            name = f"{MODEL_NAME}_{datetime.now().strftime("%Y%m%d_%H%M%S")}",
+        )
 
-    # 开始训练
-    start_training(model, tokenizer, eval_dataset, train_dataset, max_length)
+    # 开始任务
+    if LR_SEARCH == False:
+        start_training(model, tokenizer, eval_dataset, train_dataset, max_length)
+    else:
+        start_lr_search(model, tokenizer, eval_dataset, train_dataset, max_length)
+
+    # 结束 wandb
+    wandb.finish() if WANDB_ENABLE == True else None
 
 # 主函数
 if __name__ == "__main__":

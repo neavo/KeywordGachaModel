@@ -1,13 +1,10 @@
 import os
-import re
 import random
 import shutil
-import unicodedata
 from typing import Generator
 from datetime import datetime
 
 import torch
-import jaconv
 from tqdm import tqdm
 from rich import print
 from joblib import delayed
@@ -24,6 +21,8 @@ from transformers.utils import is_torch_bf16_gpu_available
 from transformers.tokenization_utils_base import BatchEncoding
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
 
+from moudle.Normalizer import Normalizer
+from callback.MemoryCallback import MemoryCallback
 from callback.PreTrainerCallback import PreTrainerCallback
 
 # 模型
@@ -31,57 +30,59 @@ SCRATCH = True
 MODEL_NAME = "modern_bert_cjk"
 MODEL_PATH = f"assets/{MODEL_NAME}"
 OUTPUT_PATH = f"output/{MODEL_NAME}_pt_e1"
-ATTN_IMPLEMENTATION = "flash_attention_2" # sdpa, flex_attention, flash_attention_2, eager
+ATTN_IMPLEMENTATION = "sdpa" # sdpa, flex_attention, flash_attention_2, eager
 
 # 训练
-WANDB_ENABLE = False
 SEED = 42
 WEIGHT_DECAY = 1 * 1e-5
 LEARNING_RATE = 5 * 1e-4
 EPOCHS = 1
+OPTIMIZER = "adamw_torch" # adamw_torch, adamw_torch_fused, paged_adamw_8bit, paged_lion_8bit, paged_ademamix_8bit
 EVAL_SIZE = 16
-BATCH_SIZE = 64
-TORCH_COMPILE = False
+BATCH_SIZE = 8
+PRECISION = "bf16" # bf16, fp16, bf16_pure
+TORCH_COMPILE = True
 GRADIENT_CHECKPOINTING = True
 GRADIENT_ACCUMULATION_SIZE = 256
 
 # 输出
-LOG_STEPS = 5
-INTERVAL_STEPS = 300
+SAVE_STEPS = 500
+EVAL_STEPS = 500
+LOGGING_STEPS = 5
 AUTO_RESUME_FROM_CHECKPOINT = True
+WANDB_ENABLE = True
 
 # 数据
-EVAL_DATA = 8
+EVAL_DATA = 2048 * 8
 LENGTH_THRESHOLD = 512
 WORKSPACE = "workspace"
 DATASET_PATH = [
-    # ("/mnt/e/ai/dataset/pt/zh", 20 * 10000),
-    # ("/mnt/e/ai/dataset/pt/zh_r18_pixiv", 20 * 10000),
-    # ("/mnt/e/ai/dataset/pt/en", 30 * 10000),
-    # ("/mnt/e/ai/dataset/pt/en_r18_visual_novels", 10 * 10000),
-    # ("/mnt/e/ai/dataset/pt/jp", 40 * 10000),
-    # ("/mnt/e/ai/dataset/pt/jp_r18", 32.5 * 10000),
-    # ("/mnt/e/ai/dataset/pt/jp_r18_rpg", 7.5 * 10000),
-    ("/mnt/e/ai/dataset/pt/jp_r18_rpg", 5 * 10000),
-    # ("/mnt/e/ai/dataset/pt/ko", 20 * 10000),
-    # ("/mnt/e/ai/dataset/pt/ko_web", 20 * 10000),
-    # ("/mnt/e/ai/dataset/pt/zh_cc100", 800 * 10000),
-    # ("/mnt/e/ai/dataset/pt/zh_cc100_tw", 400 * 10000),
-    # ("/mnt/e/ai/dataset/pt/en_c4", 800 * 10000),
-    # ("/mnt/e/ai/dataset/pt/jp_cc100", 1200 * 10000),
-    # ("/mnt/e/ai/dataset/pt/ko_cc100", 800 * 10000),
+    # ("/mnt/e/ai/dataset/pt/zh", 40 * 10000),
+    # ("/mnt/e/ai/dataset/pt/zh_r18_pixiv", 40 * 10000),
+    # ("/mnt/e/ai/dataset/pt/en", 60 * 10000),
+    # ("/mnt/e/ai/dataset/pt/en_r18_visual_novels", 20 * 10000),
+    # ("/mnt/e/ai/dataset/pt/ja", 80 * 10000),
+    # ("/mnt/e/ai/dataset/pt/ja_r18", 65 * 10000),
+    # ("/mnt/e/ai/dataset/pt/ja_r18_rpg", 15 * 10000),
+    # ("/mnt/e/ai/dataset/pt/ko", 40 * 10000),
+    # ("/mnt/e/ai/dataset/pt/ko_web", 40 * 10000),
+    ("/mnt/e/ai/dataset/pt/zh_cc100", 800 * 10000),
+    ("/mnt/e/ai/dataset/pt/zh_cc100_tw", 400 * 10000),
+    ("/mnt/e/ai/dataset/pt/en_cc100", 800 * 10000),
+    ("/mnt/e/ai/dataset/pt/ja_cc100_izumi_lab", 1200 * 10000),
+    ("/mnt/e/ai/dataset/pt/ko_cc100", 800 * 10000),
 ]
 
 # 加载模型
-def load_model(scratch: bool) -> PreTrainedModel:
+def load_model() -> PreTrainedModel:
     config = AutoConfig.from_pretrained(MODEL_PATH)
     config.reference_compile = None
 
-    if scratch == True:
+    if SCRATCH == True:
         return AutoModelForMaskedLM.from_config(
             config,
             attn_implementation = ATTN_IMPLEMENTATION,
-            torch_dtype = torch.bfloat16 if is_torch_bf16_gpu_available() == True else torch.float16,
+            torch_dtype = torch.bfloat16 if PRECISION == "bf16_pure" and is_torch_bf16_gpu_available() == True else None,
             trust_remote_code = True,
         ).to("cuda" if torch.cuda.is_available() else "cpu")
     else:
@@ -89,7 +90,7 @@ def load_model(scratch: bool) -> PreTrainedModel:
             MODEL_PATH,
             config = config,
             attn_implementation = ATTN_IMPLEMENTATION,
-            torch_dtype = torch.bfloat16 if is_torch_bf16_gpu_available() == True else torch.float16,
+            torch_dtype = torch.bfloat16 if PRECISION == "bf16_pure" and is_torch_bf16_gpu_available() == True else None,
             local_files_only = True,
             trust_remote_code = True,
             ignore_mismatched_sizes = True,
@@ -103,54 +104,18 @@ def load_tokenizer() -> PreTrainedTokenizerFast:
         local_files_only = True,
     )
 
-# 清理文本
-def cleanup(line: str, path: str) -> str:
-    # 将空格以外的空白符都替换为空格
-    # \t：制表符
-    # \n：换行符
-    # \r：回车符
-    # \v：垂直制表符
-    # \f：换页符
-    # \u3000：全角空格
-    line = re.sub(r"[\t\n\r\v\f\u3000]+", " ", line)
-
-    # 将多个空格替换为单个空格
-    line = re.sub(r" +", " ", line)
-
-    # 移除非文本字符
-    # LS（行分隔符，Line Separator，Unicode 码点为 U+2028）
-    # PS（段分隔符，Paragraph Separator，Unicode 码点为 U+2029）
-    line = re.sub(r"[\x00-\x1F\x7F\u2028\u2029]", "", line)
-
-    if "en" in path:
-        line = unicodedata.normalize("NFKC", line)
-    elif "jp" in path:
-        # Convert Half-width (Hankaku) Katakana to Full-width (Zenkaku) Katakana
-        # kana (bool) – Either converting Kana or not.
-        # ascii (bool) – Either converting ascii or not.
-        # digit (bool) – Either converting digit or not.
-        line = jaconv.hankaku2zenkaku(line, kana = True, ascii = False, digit = False)
-
-        # Convert Full-width (Zenkaku) Katakana to Half-width (Hankaku) Katakana
-        # kana (bool) – Either converting Kana or not.
-        # ascii (bool) – Either converting ascii or not.
-        # digit (bool) – Either converting digit or not.
-        line = jaconv.zenkaku2hankaku(line, kana = False, ascii = True, digit = True)
-
-    return line.strip()
-
 # 分割列表
 def split_list(lst: list, batch_size: int) -> list[list]:
     return [lst[i:i + batch_size] for i in range(0, len(lst), batch_size)]
 
 # 批量读取文本文件
-def lines_generator(path: str, batch_size: int, flag: dict) -> Generator[list, any, Dataset]:
+def lines_generator(path: str, batch_size: int, flag: dict) -> Generator[list[str], None, None]:
     # 初始化文件列表
     files = [file for file in os.scandir(path) if file.name.endswith(".txt")]
     files = random.sample(files, len(files))
 
     # 开始生成数据
-    lines = []
+    lines: list[str] = []
     for file in tqdm(files, desc = path, total = len(files)):
         # 根据信号判断是否需要停止生成数据
         if flag.get("stop", False) == True:
@@ -176,8 +141,8 @@ def lines_generator(path: str, batch_size: int, flag: dict) -> Generator[list, a
                 lines = []
 
 # 生成数据
-def datas_generator(tokenizer: PreTrainedTokenizerFast, lines: list[str], path: str) -> list[str]:
-    lines = [cleanup(line, path) for line in lines]
+def datas_generator(tokenizer: PreTrainedTokenizerFast, lines: list[str]) -> list[str]:
+    lines = [Normalizer.normalize(line, merge_space = True) for line in lines]
 
     # 获取特殊 Token 的数量
     special_tokens_num = tokenizer.num_special_tokens_to_add(pair = False)
@@ -204,7 +169,7 @@ def datas_generator(tokenizer: PreTrainedTokenizerFast, lines: list[str], path: 
 # 生成数据块
 def chunks_generator(tokenizer: PreTrainedTokenizerFast, lines: list[str], path: str) -> list[list[str]]:
     result: list[str] = []
-    datas = datas_generator(tokenizer, lines, path)
+    datas = datas_generator(tokenizer, lines)
 
     # 获取特殊 Token 的数量
     special_tokens_num = tokenizer.num_special_tokens_to_add(pair = False)
@@ -348,13 +313,6 @@ def load_dataset_map_function(samples: dict, tokenizer: PreTrainedTokenizerFast)
         return_special_tokens_mask = True,
     )
 
-    # 生成 input_tokens
-    # encodings["input_tokens"] = []
-    # for tokens in [tokenizer.convert_ids_to_tokens(v) for v in encodings.get("input_ids")]:
-    #     encodings["input_tokens"].append([])
-    #     for t in tokens:
-    #         encodings["input_tokens"][-1].append(tokenizer.convert_tokens_to_string([t]))
-
     # 计算有效的 Token 数量
     encodings["length"] = [item.count(0) for item in encodings.get("special_tokens_mask")]
 
@@ -403,34 +361,33 @@ def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, e
         # 输出
         report_to = "wandb" if WANDB_ENABLE == True else "none",
         output_dir = OUTPUT_PATH,
-        logging_steps = LOG_STEPS,
-        eval_steps = INTERVAL_STEPS,
-        save_steps = INTERVAL_STEPS,
-        eval_strategy = "steps",
-        save_strategy = "no",
+        eval_steps = EVAL_STEPS,
+        save_steps = SAVE_STEPS,
+        logging_steps = LOGGING_STEPS,
+        eval_strategy = "steps" if EVAL_STEPS != None and EVAL_STEPS > 0 else "no",
+        save_strategy = "steps" if SAVE_STEPS != None and SAVE_STEPS > 0 else "no",
+        logging_strategy = "steps" if LOGGING_STEPS != None and LOGGING_STEPS > 0 else "no",
 
         # 训练
-        bf16 = True,
         torch_compile = TORCH_COMPILE,
-        # optim = "adamw_torch",
-        optim = "paged_adamw_32bit",
-        # optim = "paged_ademamix_8bit",
-        adam_beta1 = 0.90,
-        adam_beta2 = 0.98,
-        adam_epsilon = 1e-06,
-        warmup_ratio = 0.1,
+        bf16 = PRECISION in ("bf16", "bf16_pure"),
+        optim = OPTIMIZER,
+        warmup_ratio = 0.10,
         weight_decay = WEIGHT_DECAY,
         learning_rate = LEARNING_RATE,
         num_train_epochs = EPOCHS,
         lr_scheduler_type = "warmup_stable_decay",
         lr_scheduler_kwargs = {
-            "num_decay_steps": int(len(train_dataset) * 0.1 / max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE)) + 1,
-            "num_stable_steps": int(len(train_dataset) * 0.8 / max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE)) + 1,
+            "num_decay_steps": int(len(train_dataset) * EPOCHS * 0.10 / max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE)) + 1,
+            "num_stable_steps": int(len(train_dataset) * EPOCHS * 0.80 / max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE)) + 1,
         },
         per_device_eval_batch_size = EVAL_SIZE,
         per_device_train_batch_size = BATCH_SIZE,
         gradient_checkpointing = GRADIENT_CHECKPOINTING,
         gradient_accumulation_steps = int(max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE) / BATCH_SIZE),
+        dataloader_pin_memory = True,
+        dataloader_num_workers = 8,
+        dataloader_persistent_workers = True,
     )
 
     trainer = Trainer(
@@ -449,16 +406,26 @@ def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, e
     trainer.add_callback(
         PreTrainerCallback(
             trainer = trainer,
-        ),
+        )
     )
+    # trainer.add_callback(
+    #     MemoryCallback(
+    #         threshold = 0.93,
+    #         check_steps = 1,
+    #         force_clean_on_start = True,
+    #     )
+    # )
 
     # 检查是否自动恢复训练
     resume_from_checkpoint = f"{OUTPUT_PATH}/latest" if AUTO_RESUME_FROM_CHECKPOINT == True and os.path.isdir(f"{OUTPUT_PATH}/latest") else None
     if resume_from_checkpoint != None:
-        print(f"在 {OUTPUT_PATH} 找到可恢复的训练状态，自动继续训练 ...")
+        print("")
+        print(f"在 [green]{OUTPUT_PATH}[/] 找到可恢复的训练状态，自动继续训练 ...")
+        print("")
     trainer.train(
         resume_from_checkpoint = resume_from_checkpoint,
     )
+    trainer.accelerator.free_memory()
 
 # 主函数
 def main() -> None:
@@ -472,10 +439,10 @@ def main() -> None:
     eval_dataset, train_dataset = load_dataset(tokenizer)
 
     # 加载模型
-    model = load_model(SCRATCH)
+    model = load_model()
 
     # 调整 token_embeddings 的大小
-    if SCRATCH == False:
+    if len(tokenizer) != model.get_input_embeddings().weight.shape[0]:
         model.resize_token_embeddings(len(tokenizer))
 
     # 打印模型的参数量
@@ -491,6 +458,13 @@ def main() -> None:
 
     # 开始训练
     start_training(model, tokenizer, eval_dataset, train_dataset)
+
+    # 结束 wandb
+    if WANDB_ENABLE == True:
+        wandb.finish()
+
+    # 退出
+    os._exit(0)
 
 # 主函数
 if __name__ == "__main__":

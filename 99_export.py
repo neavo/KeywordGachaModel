@@ -21,7 +21,6 @@ def load_model(input: str, output_path: str) -> PreTrainedModel:
             trust_remote_code = True,
             low_cpu_mem_usage = True,
             ignore_mismatched_sizes = True,
-            torch_dtype = torch.bfloat16,
             quantization_config = BitsAndBytesConfig(load_in_4bit = True),
         )
     elif "bnb_8bit" in output_path:
@@ -31,7 +30,6 @@ def load_model(input: str, output_path: str) -> PreTrainedModel:
             trust_remote_code = True,
             low_cpu_mem_usage = True,
             ignore_mismatched_sizes = True,
-            torch_dtype = torch.bfloat16,
             quantization_config = BitsAndBytesConfig(load_in_8bit = True),
         )
     else:

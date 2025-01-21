@@ -24,6 +24,10 @@ class PreTrainerCallback(TrainerCallback):
         self.best_path = f"{args.output_dir}/best"
         self.lastest_path = f"{args.output_dir}/latest"
 
+    # 结束训练时
+    def on_train_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: dict) -> None:
+        self.trainer.evaluate()
+
     # 评估时
     def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics: dict, **kwargs: dict) -> None:
         # 保存最佳
@@ -31,25 +35,6 @@ class PreTrainerCallback(TrainerCallback):
 
         # 保存最新
         self.save_latest(args, state, metrics, self.lastest_path)
-
-    # Step 开始时
-    def on_step_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs) -> None:
-        if state.global_step == 16:
-            self.clear_memory(0.50)
-        else:
-            self.clear_memory(0.92)
-
-    # 清理显存
-    def clear_memory(self, threshold: float) -> None:
-        # 使用 nvidia-smi 获取显存信息
-        result = os.popen("nvidia-smi --query-gpu=memory.total,memory.reserved,memory.used --format csv,noheader,nounits").readlines()
-        result = result[0].strip().split(", ")
-        total = int(result[0])
-        used = int(result[1]) + int(result[2])
-
-        # 如果显存使用量大于阈值，则清理显存
-        if used / total > threshold:
-            torch.cuda.empty_cache()
 
     # 保存到本地
     def save(self, args: TrainingArguments, state: TrainerState, metrics: dict, path: str) -> None:

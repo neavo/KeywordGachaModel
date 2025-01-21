@@ -9,11 +9,12 @@ from openai import AsyncOpenAI
 from aiolimiter import AsyncLimiter
 
 # 设置接口
-BATCH = 1
+BATCH = 16
 MODEL = "no"
 API_KEY = "no"
-BASE_URL = "http://127.0.0.1:8080"
-TEMPERATURE = 0.05
+BASE_URL = "http://pc.neavo.me:8080"
+TOP_P = 0.95
+TEMPERATURE = 0.50
 
 # 设置任务参数
 TIMEOUT = 180
@@ -101,12 +102,13 @@ async def request(lines: list[str], prompt: str, tasks: list[asyncio.Task], succ
             ]
 
             llm_request = {
-                "model" : MODEL,
-                "stream" : False,
-                "temperature" : TEMPERATURE,
-                "max_tokens" : 4096,
+                "model": MODEL,
+                "stream": False,
+                "temperature": TEMPERATURE,
+                "top_p": TOP_P,
+                "max_tokens": 4096,
                 # "frequency_penalty" : 0.2 if retry == True else 0,
-                "messages" : messages,
+                "messages": messages,
             }
 
             completion = await OPENAICLIENT.chat.completions.create(**llm_request)
