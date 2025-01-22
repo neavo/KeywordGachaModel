@@ -61,10 +61,10 @@ LOGGING_STEPS = 5
 # 数据
 EVAL_DATA = 4096
 DATASET_PATH = [
-    ("/mnt/e/ai/dataset/ner/zh", 2 * 10000 + EVAL_DATA / 4),
-    ("/mnt/e/ai/dataset/ner/en", 2 * 10000 + EVAL_DATA / 4),
-    ("/mnt/e/ai/dataset/ner/jp", 2 * 10000 + EVAL_DATA / 4),
-    ("/mnt/e/ai/dataset/ner/ko", 2 * 10000 + EVAL_DATA / 4),
+    ("/mnt/e/ai/dataset/ner/zh/20250102", 2 * 10000 + EVAL_DATA / 4),
+    ("/mnt/e/ai/dataset/ner/en/20250102", 2 * 10000 + EVAL_DATA / 4),
+    ("/mnt/e/ai/dataset/ner/ja/20250102", 2 * 10000 + EVAL_DATA / 4),
+    ("/mnt/e/ai/dataset/ner/ko/20250102", 2 * 10000 + EVAL_DATA / 4),
 ]
 
 # 加载模型
@@ -101,12 +101,12 @@ def sample(data: list[dict], limit: int) -> list[dict]:
     type_count = {}
     for item in data:
         for entity in item.get("entities", []):
-            type_count[entity.get("entity_type")] = type_count.get(entity.get("entity_type"), 0) + 1
+            type_count[entity.get("entity_group")] = type_count.get(entity.get("entity_group"), 0) + 1
     max_k = max(type_count, key = lambda k: type_count.get(k), default="")
 
     # 拆分数据
-    data_x = [item for item in data if any(entity.get("entity_type") != max_k for entity in item.get("entities", []))]
-    data_y = [item for item in data if not any(entity.get("entity_type") != max_k for entity in item.get("entities", []))]
+    data_x = [item for item in data if any(entity.get("entity_group") != max_k for entity in item.get("entities", []))]
+    data_y = [item for item in data if not any(entity.get("entity_group") != max_k for entity in item.get("entities", []))]
 
     # 随机取样
     if len(data_x) >= limit:
@@ -140,8 +140,8 @@ def load_dataset(tokenizer: PreTrainedTokenizerFast) -> tuple[Dataset, Dataset, 
     types = set()
     for v in data:
         for entity in v.get("entities", []):
-            if entity.get("entity_type") != "":
-                types.add(entity.get("entity_type"))
+            if entity.get("entity_group") != "":
+                types.add(entity.get("entity_group"))
     id2label = {0: "O"}
     for c in list(sorted(types)):
         id2label[len(id2label)] = f"B-{c}"
@@ -211,14 +211,14 @@ def load_dataset_map_function(samples: dict, tokenizer: PreTrainedTokenizerFast,
         result = []
         for entity in entities:
             surface = entity.get("surface", "")
-            entity_type = entity.get("entity_type", "")
+            entity_group = entity.get("entity_group", "")
 
             # 获取实体词语在字符串中的位置
             char_start = sentence.find(surface)
             char_end = char_start + len(surface)
 
             # 有效性检查
-            if char_start < 0 or surface == "" or entity_type == "":
+            if char_start < 0 or surface == "" or entity_group == "":
                 continue
 
             # 通过字符位置反查 Token 位置
@@ -228,7 +228,7 @@ def load_dataset_map_function(samples: dict, tokenizer: PreTrainedTokenizerFast,
             if token_start == -1 or token_end == -1:
                 continue
 
-            result.append((token_start, token_end, entity_type))
+            result.append((token_start, token_end, entity_group))
 
         # 生成 labels
         labels = [0 for _ in range(len(input_ids))]

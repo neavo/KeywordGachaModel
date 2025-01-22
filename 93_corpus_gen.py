@@ -1,4 +1,3 @@
-import re
 import copy
 import json
 import argparse
@@ -8,52 +7,7 @@ import unicodedata
 from tqdm import tqdm
 from rich import print
 
-# 安全加载 JSON 字典
-def safe_load_json_dict(json_str: str) -> dict:
-    result = {}
-
-    # 移除首尾空白符（含空格、制表符、换行符）
-    json_str = json_str.strip()
-
-    # 移除代码标识
-    json_str = json_str.removeprefix("```json").removeprefix("```").strip()
-
-    # 先尝试使用 json.loads 解析
-    try:
-        result = json.loads(json_str)
-    except Exception:
-        pass
-
-    # 否则使用正则表达式匹配
-    if len(result) == 0:
-        for item in re.findall(r"['\"].+?['\"]\s*\:\s*['\"].+?['\"]\s*(?=[,}])", json_str, flags = re.IGNORECASE):
-            p = item.split(":")
-            result[p[0].strip().strip("'\"").strip()] = p[1].strip().strip("'\"").strip()
-
-    return result
-
-# 安全加载 JSON 列表
-def safe_load_json_list(json_str: str) -> list:
-    result = []
-
-    # 移除首尾空白符（含空格、制表符、换行符）
-    json_str = json_str.strip()
-
-    # 移除代码标识
-    json_str = json_str.removeprefix("```json").removeprefix("```").strip()
-
-    # 先尝试使用 json.loads 解析
-    try:
-        result = json.loads(json_str)
-    except Exception:
-        pass
-
-    # 否则使用正则表达式匹配
-    if len(result) == 0:
-        for item in re.findall(r"\{.+?\}", json_str, flags = re.IGNORECASE):
-            result.append(safe_load_json_dict(item))
-
-    return result
+from moudle.TextHelper import TextHelper
 
 # 计算字符串的实际显示长度
 def get_display_lenght(text: str) -> int:
@@ -77,21 +31,14 @@ def main(target: str) -> None:
         response = item.get("response")
 
         try:
-            entities = safe_load_json_list(response.get("choices")[0].get("message").get("content"))
-            sentences = request.get("messages")[1].get("content").splitlines()
+            request_content = TextHelper.safe_load_json_dict(request.get("messages")[1].get("content"))
+            sentences = request_content.get("sentences").splitlines()
 
-            # 预处理
-            entities_ex = []
-            for entity in entities:
-                surface = entity.get("surface")
+            response_content = response.get("choices")[0].get("message").get("content")
+            entities = TextHelper.safe_load_json_list(response_content.split("</think>")[-1])
 
-                # 跳过空字符串和单个字符
-                if get_display_lenght(surface) <= 2:
-                    print(f"检测到空字符串和单个字符 -> {surface}")
-                    continue
-
-                entities_ex.append(entity)
-            entities = entities_ex
+            # 跳过空字符串和单个字符
+            entities = [entity for entity in entities if isinstance(entity, dict) and get_display_lenght(entity.get("surface", "")) > 2]
 
             # 遍历句子
             for sentence in sentences:
@@ -103,17 +50,17 @@ def main(target: str) -> None:
                         continue
 
                     # 映射实体类型
-                    entity_type = entity.get("entity_type")
-                    if any(v in entity_type for v in ("姓名", "姓", "姓氏", "名", "名字", "昵称", "家族", "怪物", "神")):
-                        entities_ex[i]["entity_type"] = "PER"
-                    elif any(v in entity_type for v in ("地点", "国家")):
-                        entities_ex[i]["entity_type"] = "LOC"
-                    elif any(v in entity_type for v in ("组织", "組織", "学派", "学校", "派閥")):
-                        entities_ex[i]["entity_type"] = "ORG"
-                    elif any(v in entity_type for v in ("物品",)):
-                        entities_ex[i]["entity_type"] = "PRD"
+                    entity_group = entity.get("entity_group")
+                    if entity_group in ("姓名", "名字"):
+                        entities_ex[i]["entity_group"] = "PER"
+                    elif entity_group in ("地点", "建筑"):
+                        entities_ex[i]["entity_group"] = "LOC"
+                    elif entity_group in ("组织", "家族", "种族"):
+                        entities_ex[i]["entity_group"] = "ORG"
+                    elif entity_group in ("物品", "食品", "工具"):
+                        entities_ex[i]["entity_group"] = "PRD"
                     else:
-                        unsupport.add(entity_type)
+                        unsupport.add(entity_group)
                         entities_ex[i]["surface"] = ""
                         continue
 
@@ -136,8 +83,7 @@ def main(target: str) -> None:
                         }
                     )
         except Exception as e:
-            print(f"{e}")
-            traceback.print_exc()
+            print(f"{e}\n{("".join(traceback.format_exception(None, e, e.__traceback__))).strip()}")
 
     # 写入文件
     print(f"{target.replace(".log", f"_dataset_{len(data)}.json")} -> {len(data)}")
