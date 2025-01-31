@@ -26,51 +26,59 @@ from seqeval.metrics import accuracy_score
 from seqeval.metrics import precision_score
 from seqeval.metrics import classification_report
 
-from callback.LRSearchCallback import LRSearchCallback
+from callback.MemoryCallback import MemoryCallback
 from callback.NERTrainerCallback import NERTrainerCallback
 
 # 任务
-LR_SEARCH = False
+START_DATE = datetime.now().strftime("%Y%m%d")
+START_TIME = datetime.now().strftime("%H%M%S")
 WANDB_ENABLE = True
 
 # 模型
-MODEL_NAME = "facebookai_xlm_roberta_base_pt_20250118"
-MODEL_PATH = f"assets/{MODEL_NAME}"
-OUTPUT_PATH = "output"
-ATTN_IMPLEMENTATION = "sdpa" # sdpa, flash_attention_2, eager
+INPUT_NAME = "keyword_gacha_multilingual"
+INPUT_PATH = f"assets/{INPUT_NAME}/20250128/latest"
+OUTPUT_NAME = "keyword_gacha_multilingual_ner"
+OUTPUT_PATH = f"output/{OUTPUT_NAME}/{START_DATE}_5e5_cosine"
+PROJECT_NAME = f"{OUTPUT_NAME}_{START_DATE}_5e5_cosine"
+ATTN_IMPLEMENTATION = "flash_attention_2" # sdpa, flash_attention_2, eager
 
 # 训练
 SEED = 42
 PATIENCE = 999
 OPTIMIZER = "adamw_torch" # adamw_torch, adamw_torch_fused, paged_adamw_8bit, paged_lion_8bit, paged_ademamix_8bit
-MAX_STEPS = 12500
+MAX_STEPS = 7500
 EVAL_SIZE = 128
 BATCH_SIZE = 32
-TORCH_COMPILE = True
+TORCH_COMPILE = False
 FROZEN_LAYER = 0
-WEIGHT_DECAY = 1 * 1e-2
-LEARNING_RATE = 8 * 1e-6
+WEIGHT_DECAY = 1 * 1e-5
+LEARNING_RATE = 5 * 1e-5
 GRADIENT_CHECKPOINTING = False
 GRADIENT_ACCUMULATION_SIZE = 0
 
 # 输出
 SAVE_STEPS = 0
-EVAL_STEPS = 300
+EVAL_STEPS = 200
 LOGGING_STEPS = 5
+WARMUP_STEPS = 750
 
 # 数据
 EVAL_DATA = 4096
 DATASET_PATH = [
-    ("/mnt/e/ai/dataset/ner/zh/20250102", 2 * 10000 + EVAL_DATA / 4),
-    ("/mnt/e/ai/dataset/ner/en/20250102", 2 * 10000 + EVAL_DATA / 4),
-    ("/mnt/e/ai/dataset/ner/ja/20250102", 2 * 10000 + EVAL_DATA / 4),
-    ("/mnt/e/ai/dataset/ner/ko/20250102", 2 * 10000 + EVAL_DATA / 4),
+    # ("/mnt/e/ai/dataset/ner/zh/20250102", 1.5 * 10000 + EVAL_DATA / 8),
+    # ("/mnt/e/ai/dataset/ner/en/20250102", 1.5 * 10000 + EVAL_DATA / 8),
+    # ("/mnt/e/ai/dataset/ner/ja/20250102", 1.5 * 10000 + EVAL_DATA / 8),
+    # ("/mnt/e/ai/dataset/ner/ko/20250102", 1.5 * 10000 + EVAL_DATA / 8),
+    ("/mnt/e/ai/dataset/ner/zh/20250121", 2.5 * 10000 + EVAL_DATA / 4),
+    ("/mnt/e/ai/dataset/ner/en/20250121", 2.5 * 10000 + EVAL_DATA / 4),
+    ("/mnt/e/ai/dataset/ner/ja/20250121", 2.5 * 10000 + EVAL_DATA / 4),
+    ("/mnt/e/ai/dataset/ner/ko/20250121", 2.5 * 10000 + EVAL_DATA / 4),
 ]
 
 # 加载模型
 def load_model(id2label: dict, label2id: dict) -> PreTrainedModel:
     config = AutoConfig.from_pretrained(
-        MODEL_PATH,
+        INPUT_PATH,
         local_files_only = True,
         trust_remote_code = True,
     )
@@ -79,7 +87,7 @@ def load_model(id2label: dict, label2id: dict) -> PreTrainedModel:
     config.num_labels = len(id2label)
 
     return AutoModelForTokenClassification.from_pretrained(
-        MODEL_PATH,
+        INPUT_PATH,
         config = config,
         local_files_only = True,
         trust_remote_code = True,
@@ -90,7 +98,7 @@ def load_model(id2label: dict, label2id: dict) -> PreTrainedModel:
 # 加载分词器
 def load_tokenizer() -> PreTrainedTokenizerFast:
     return AutoTokenizer.from_pretrained(
-        MODEL_PATH,
+        INPUT_PATH,
         do_lower_case = False,
         local_files_only = True,
     )
@@ -309,7 +317,7 @@ def print_model_parameters(model: PreTrainedModel) -> None:
             embedding = embedding + param.numel()
 
     print("")
-    print(f"{MODEL_NAME} : layer - {layer / 1e6:.2f} M / embedding - {embedding / 1e6:.2f} M / total - {total / 1e6:.2f} M")
+    print(f"{INPUT_NAME} : layer - {layer / 1e6:.2f} M / embedding - {embedding / 1e6:.2f} M / total - {total / 1e6:.2f} M")
     print("")
 
 # 计算评估指标
@@ -352,19 +360,18 @@ def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, e
         torch_compile = TORCH_COMPILE,
         bf16 = True,
         optim = OPTIMIZER,
-        warmup_ratio = 0.10,
         weight_decay = WEIGHT_DECAY,
         learning_rate = LEARNING_RATE,
         max_steps = MAX_STEPS,
-        lr_scheduler_type = "warmup_stable_decay",
-        lr_scheduler_kwargs = {
-            "num_decay_steps": int(MAX_STEPS * 0.10) + 1,
-            "num_stable_steps": int(MAX_STEPS * 0.80) + 1,
-        },
+        warmup_steps = int(WARMUP_STEPS),
+        lr_scheduler_type = "cosine",
         per_device_eval_batch_size = EVAL_SIZE,
         per_device_train_batch_size = BATCH_SIZE,
         gradient_checkpointing = GRADIENT_CHECKPOINTING,
         gradient_accumulation_steps = int(max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE) / BATCH_SIZE),
+        dataloader_pin_memory = True,
+        dataloader_num_workers = min(8, os.cpu_count()),
+        dataloader_persistent_workers = False,
     )
 
     trainer = Trainer(
@@ -385,55 +392,17 @@ def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, e
         NERTrainerCallback(
             trainer = trainer,
             patience = PATIENCE,
-            model_name = MODEL_NAME,
         ),
+    )
+    trainer.add_callback(
+        MemoryCallback(
+            threshold = 0,
+            check_steps = 0,
+            force_clean_on_start = True,
+        )
     )
 
     # 开始训练
-    trainer.train()
-
-def start_lr_search(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, eval_dataset: Dataset, train_dataset: Dataset, max_length: int) -> None:
-
-    training_args = TrainingArguments(
-        # 输出
-        report_to = "wandb" if WANDB_ENABLE == True else "none",
-        output_dir = OUTPUT_PATH,
-        logging_steps = 1,
-        eval_strategy = "no",
-        save_strategy = "no",
-        logging_strategy = "steps",
-
-        # 训练
-        torch_compile = TORCH_COMPILE,
-        bf16 = True,
-        optim = OPTIMIZER,
-        warmup_ratio = 0.10,
-        weight_decay = 0.00,
-        learning_rate = 1e-7,
-        lr_scheduler_type = "constant",
-        max_steps = MAX_STEPS,
-        per_device_train_batch_size = BATCH_SIZE,
-        gradient_checkpointing = GRADIENT_CHECKPOINTING,
-        gradient_accumulation_steps = int(max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE) / BATCH_SIZE),
-    )
-
-    trainer = Trainer(
-        args = training_args,
-        model = model,
-        data_collator = DataCollatorForTokenClassification(
-            tokenizer = tokenizer,
-            padding = "max_length",
-            max_length = max_length,
-            pad_to_multiple_of = 8,
-        ),
-        train_dataset = train_dataset,
-        compute_metrics = lambda eval_prediction: compute_metrics(eval_prediction = eval_prediction, id2label = model.config.id2label),
-        processing_class = tokenizer,
-    )
-
-    trainer.add_callback(LRSearchCallback(
-        trainer = trainer,
-    ))
     trainer.train()
 
 # 主函数
@@ -461,14 +430,11 @@ def main() -> None:
         import wandb
         wandb.init(
             project = "NER",
-            name = f"{MODEL_NAME}_{datetime.now().strftime("%Y%m%d_%H%M%S")}",
+            name = PROJECT_NAME,
         )
 
     # 开始任务
-    if LR_SEARCH == False:
-        start_training(model, tokenizer, eval_dataset, train_dataset, max_length)
-    else:
-        start_lr_search(model, tokenizer, eval_dataset, train_dataset, max_length)
+    start_training(model, tokenizer, eval_dataset, train_dataset, max_length)
 
     # 结束 wandb
     wandb.finish() if WANDB_ENABLE == True else None

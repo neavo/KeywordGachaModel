@@ -29,10 +29,11 @@ def load_from_epub_file(root: str, file: str) -> None:
         # 数据处理
         lines = []
         for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
-            line = BeautifulSoup(item.get_content(), "html.parser").get_text()
-            line = Normalizer.normalize(line, merge_space = True)
-            if line != "":
-                lines.append(line)
+            result = BeautifulSoup(item.get_content(), "html.parser").get_text().splitlines()
+            for line in result:
+                line = Normalizer.normalize(line, merge_space = True)
+                if line != "":
+                    lines.append(line)
 
         # 创建输出文件夹
         os.makedirs(f"{root}/output/", exist_ok = True)

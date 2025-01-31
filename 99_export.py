@@ -1,130 +1,70 @@
-import argparse
 import os
-import sys
 import shutil
-import subprocess
+import argparse
 
 import torch
-from tqdm import tqdm
 from rich import print
 
-from transformers import AutoTokenizer
+from transformers import AutoConfig
 from transformers import PreTrainedModel
-from transformers import BitsAndBytesConfig
 from transformers import AutoModelForTokenClassification
 
 # 加载模型
 def load_model(target: str, output_path: str) -> PreTrainedModel:
+    config = AutoConfig.from_pretrained(
+        target,
+        local_files_only = True,
+        trust_remote_code = True,
+    )
+    config.reference_compile = None
+
     if "bf16" in output_path:
         return AutoModelForTokenClassification.from_pretrained(
             target,
+            config = config,
             torch_dtype = torch.bfloat16,
+            attn_implementation = "sdpa",
             local_files_only = True,
             trust_remote_code = True,
             ignore_mismatched_sizes = True,
         )
-    elif "bnb_4bit" in output_path:
+    elif "fp16" in output_path:
         return AutoModelForTokenClassification.from_pretrained(
             target,
+            config = config,
+            torch_dtype = torch.float16,
+            attn_implementation = "sdpa",
             local_files_only = True,
             trust_remote_code = True,
             ignore_mismatched_sizes = True,
-            quantization_config = BitsAndBytesConfig(load_in_4bit = True),
-        )
-    elif "bnb_8bit" in output_path:
-        return AutoModelForTokenClassification.from_pretrained(
-            target,
-            local_files_only = True,
-            trust_remote_code = True,
-            ignore_mismatched_sizes = True,
-            quantization_config = BitsAndBytesConfig(load_in_8bit = True),
         )
     else:
         return AutoModelForTokenClassification.from_pretrained(
             target,
+            config = config,
+            torch_dtype = torch.float32,
+            attn_implementation = "sdpa",
             local_files_only = True,
             trust_remote_code = True,
             ignore_mismatched_sizes = True,
-            torch_dtype = torch.bfloat16,
-        ).to("cuda" if torch.cuda.is_available() else "cpu")
+        )
 
-def export_bnb_4bit(target: str) -> None:
-    path = f"{target}_bnb_4bit"
+# 导出模型
+def export(input_path: str, dtype: str) -> None:
+    output_path = f"{input_path}_{dtype}"
 
-    print(f"")
-    print(f"正在导出 {path} ...")
-    shutil.rmtree(f"{path}", ignore_errors = True)
-    shutil.copytree(target, f"{path}", dirs_exist_ok = True)
-    os.remove(f"{path}/model.safetensors") if os.path.exists(f"{path}/model.safetensors") else None
-    os.remove(f"{path}/pytorch_model.bin") if os.path.exists(f"{path}/pytorch_model.bin") else None
+    print("")
+    print(f"正在导出 [green]{output_path}[/] ...")
+    shutil.rmtree(f"{output_path}", ignore_errors = True)
+    shutil.copytree(input_path, f"{output_path}", dirs_exist_ok = True)
+    os.remove(f"{output_path}/model.safetensors") if os.path.exists(f"{output_path}/model.safetensors") else None
+    os.remove(f"{output_path}/pytorch_model.bin") if os.path.exists(f"{output_path}/pytorch_model.bin") else None
 
-    load_model(target, path).save_pretrained(f"{path}")
-
-def export_bf16(target: str) -> None:
-    path = f"{target}_bf16"
-
-    print(f"")
-    print(f"正在导出 {path} ...")
-    shutil.rmtree(f"{path}", ignore_errors = True)
-    shutil.copytree(target, f"{path}", dirs_exist_ok = True)
-    os.remove(f"{path}/model.safetensors") if os.path.exists(f"{path}/model.safetensors") else None
-    os.remove(f"{path}/pytorch_model.bin") if os.path.exists(f"{path}/pytorch_model.bin") else None
-
-    load_model(target, path).save_pretrained(f"{path}")
-
-def export_bnb_8bit(target: str) -> None:
-    path = f"{target}_bnb_8bit"
-
-    print(f"")
-    print(f"正在导出 {path} ...")
-    shutil.rmtree(f"{path}", ignore_errors = True)
-    shutil.copytree(target, f"{path}", dirs_exist_ok = True)
-    os.remove(f"{path}/model.safetensors") if os.path.exists(f"{path}/model.safetensors") else None
-    os.remove(f"{path}/pytorch_model.bin") if os.path.exists(f"{path}/pytorch_model.bin") else None
-
-    load_model(target, path).save_pretrained(f"{path}")
-
-def export_onnx(target: str) -> None:
-    path = f"{target}_onnx"
-
-    print(f"")
-    print(f"正在导出 {path} ...")
-    shutil.rmtree(f"{path}", ignore_errors = True)
-    shutil.copytree(target, f"{path}", dirs_exist_ok = True)
-    os.remove(f"{path}/model.safetensors") if os.path.exists(f"{path}/model.safetensors") else None
-    os.remove(f"{path}/pytorch_model.bin") if os.path.exists(f"{path}/pytorch_model.bin") else None
-
-    subprocess.run(
-        f"optimum-cli export onnx --task token-classification -m {target} {path}",
-        shell = True,
-        check = True,
-    )
-
-def export_onnx_avx512(target: str) -> None:
-    path = f"{target}_onnx_avx512"
-
-    print(f"")
-    print(f"正在导出 {path} ...")
-    shutil.rmtree(f"{path}", ignore_errors = True)
-    shutil.copytree(target, f"{path}", dirs_exist_ok = True)
-    os.remove(f"{path}/model.safetensors") if os.path.exists(f"{path}/model.safetensors") else None
-    os.remove(f"{path}/pytorch_model.bin") if os.path.exists(f"{path}/pytorch_model.bin") else None
-
-    subprocess.run(
-        f"optimum-cli onnxruntime quantize --avx512 --per_channel --onnx_model {target}_onnx -o {path}",
-        shell = True,
-        check = True,
-    )
+    load_model(input_path, output_path).save_pretrained(f"{output_path}")
 
 # 运行主函数
 def main(target: str) -> None:
-    export_bf16(target)
-
-    # export_bnb_4bit(target)
-    # export_bnb_8bit(target)
-
-    export_onnx(target)
-    export_onnx_avx512(target)
+    export(target, "bf16")
 
 # 运行主函数
 if __name__ == "__main__":

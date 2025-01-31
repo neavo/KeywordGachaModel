@@ -14,12 +14,11 @@ from transformers import TrainingArguments
 
 class NERTrainerCallback(TrainerCallback):
 
-    def __init__(self, trainer: Trainer, model_name: str, patience: int) -> None:
+    def __init__(self, trainer: Trainer, patience: int) -> None:
 
         # 初始化
         self.trainer = trainer
         self.tokenizer = trainer.processing_class
-        self.model_name = model_name                    # 模型名称
         self.patience = int(patience)                   # 早停耐心值，即最大允许没有改进的轮数
 
         self.console = Console()
@@ -33,13 +32,11 @@ class NERTrainerCallback(TrainerCallback):
 
     # 在训练开始时检查并移除旧的模型保存目录
     def on_train_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: dict) -> None:
-        self.lastest_path = f"{args.output_dir}/{self.model_name.replace("-", "_")}_ner_latest"
-        self.best_f1_path = f"{args.output_dir}/{self.model_name.replace("-", "_")}_ner_best_f1"
-        self.best_loss_path = f"{args.output_dir}/{self.model_name.replace("-", "_")}_ner_best_loss"
+        self.best_path = f"{args.output_dir}/best"
+        self.lastest_path = f"{args.output_dir}/latest"
 
+        shutil.rmtree(self.best_path, ignore_errors = True)
         shutil.rmtree(self.lastest_path, ignore_errors = True)
-        shutil.rmtree(self.best_f1_path, ignore_errors = True)
-        shutil.rmtree(self.best_loss_path, ignore_errors = True)
 
     # 评估时
     def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics: dict, **kwargs: dict) -> None:
@@ -114,11 +111,8 @@ class NERTrainerCallback(TrainerCallback):
 
     # 判断是否需要保存最佳模型
     def check_and_save_best(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics: dict, **kwargs: dict) -> None:
-        if self.metrics_history["f1"][-1] > self.best_metric_f1:
-            self.save(args, state, metrics, self.best_f1_path)
-
         if self.metrics_history["eval_loss"][-1] < self.best_metric_eval_loss:
-            self.save(args, state, metrics, self.best_loss_path)
+            self.save(args, state, metrics, self.best_path)
 
     # 判断是否需要触发早停
     def check_early_stopping(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, metrics: dict, **kwargs: dict) -> None:
@@ -150,8 +144,8 @@ class NERTrainerCallback(TrainerCallback):
         # 打印分隔行
         print("") if f1_improved == True or eval_loss_improved == True or train_loss_improved == True else None
 
-        # 如果评估指标或评估损失有更新，则耐心计数值重置，否则耐心计数值增加
-        if f1_improved == True or eval_loss_improved == True:
+        # 如果评估损失有更新，则耐心计数值重置，否则耐心计数值增加
+        if eval_loss_improved == True:
             self.wait_for_early_stop = 0
         else:
             self.wait_for_early_stop = self.wait_for_early_stop + 1

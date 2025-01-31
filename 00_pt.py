@@ -25,11 +25,17 @@ from moudle.Normalizer import Normalizer
 from callback.MemoryCallback import MemoryCallback
 from callback.PreTrainerCallback import PreTrainerCallback
 
+# 任务
+SCRATCH = False
+START_DATE = datetime.now().strftime("%Y%m%d")
+START_TIME = datetime.now().strftime("%H%M%S")
+WANDB_ENABLE = True
+
 # 模型
-SCRATCH = True
-MODEL_NAME = "modern_bert_cjk"
-MODEL_PATH = f"assets/{MODEL_NAME}"
-OUTPUT_PATH = f"output/{MODEL_NAME}_pt_e1"
+INPUT_NAME = "modern_bert_multilingual"
+INPUT_PATH = f"assets/{INPUT_NAME}/20250128/nodecay"
+OUTPUT_NAME = "keyword_gacha_multilingual"
+OUTPUT_PATH = f"output/{OUTPUT_NAME}/{START_DATE}"
 ATTN_IMPLEMENTATION = "sdpa" # sdpa, flex_attention, flash_attention_2, eager
 
 # 训练
@@ -38,45 +44,43 @@ WEIGHT_DECAY = 1 * 1e-5
 LEARNING_RATE = 5 * 1e-4
 EPOCHS = 1
 OPTIMIZER = "adamw_torch" # adamw_torch, adamw_torch_fused, paged_adamw_8bit, paged_lion_8bit, paged_ademamix_8bit
-EVAL_SIZE = 16
+EVAL_SIZE = 8
 BATCH_SIZE = 8
 PRECISION = "bf16" # bf16, fp16, bf16_pure
 TORCH_COMPILE = True
 GRADIENT_CHECKPOINTING = True
-GRADIENT_ACCUMULATION_SIZE = 256
+GRADIENT_ACCUMULATION_SIZE = 256 * 7
 
 # 输出
-SAVE_STEPS = 500
-EVAL_STEPS = 500
-LOGGING_STEPS = 5
+SAVE_STEPS = 50
+EVAL_STEPS = 50
+LOGGING_STEPS = 1
 AUTO_RESUME_FROM_CHECKPOINT = True
-WANDB_ENABLE = True
 
 # 数据
-EVAL_DATA = 2048 * 8
+EVAL_DATA = 2048
 LENGTH_THRESHOLD = 512
 WORKSPACE = "workspace"
 DATASET_PATH = [
-    # ("/mnt/e/ai/dataset/pt/zh", 40 * 10000),
-    # ("/mnt/e/ai/dataset/pt/zh_r18_pixiv", 40 * 10000),
-    # ("/mnt/e/ai/dataset/pt/en", 60 * 10000),
-    # ("/mnt/e/ai/dataset/pt/en_r18_visual_novels", 20 * 10000),
-    # ("/mnt/e/ai/dataset/pt/ja", 80 * 10000),
-    # ("/mnt/e/ai/dataset/pt/ja_r18", 65 * 10000),
-    # ("/mnt/e/ai/dataset/pt/ja_r18_rpg", 15 * 10000),
-    # ("/mnt/e/ai/dataset/pt/ko", 40 * 10000),
-    # ("/mnt/e/ai/dataset/pt/ko_web", 40 * 10000),
-    ("/mnt/e/ai/dataset/pt/zh_cc100", 800 * 10000),
-    ("/mnt/e/ai/dataset/pt/zh_cc100_tw", 400 * 10000),
-    ("/mnt/e/ai/dataset/pt/en_cc100", 800 * 10000),
-    ("/mnt/e/ai/dataset/pt/ja_cc100_izumi_lab", 1200 * 10000),
-    ("/mnt/e/ai/dataset/pt/ko_cc100", 800 * 10000),
+    ("/mnt/e/ai/dataset/pt/zh", 20 * 10000),
+    ("/mnt/e/ai/dataset/pt/zh_r18_pixiv", 20 * 10000),
+    ("/mnt/e/ai/dataset/pt/en", 30 * 10000),
+    ("/mnt/e/ai/dataset/pt/en_r18_visual_novels", 10 * 10000),
+    ("/mnt/e/ai/dataset/pt/ja", 40 * 10000),
+    ("/mnt/e/ai/dataset/pt/ja_r18", 32.5 * 10000),
+    ("/mnt/e/ai/dataset/pt/ja_r18_rpg", 7.5 * 10000),
+    ("/mnt/e/ai/dataset/pt/ko", 20 * 10000),
+    ("/mnt/e/ai/dataset/pt/ko_web", 20 * 10000),
+    # ("/mnt/e/ai/dataset/pt/zh_cc100", 800 * 10000),
+    # ("/mnt/e/ai/dataset/pt/zh_cc100_tw", 400 * 10000),
+    # ("/mnt/e/ai/dataset/pt/en_cc100", 800 * 10000),
+    # ("/mnt/e/ai/dataset/pt/ja_cc100_izumi_lab", 1200 * 10000),
+    # ("/mnt/e/ai/dataset/pt/ko_cc100", 800 * 10000),
 ]
 
 # 加载模型
 def load_model() -> PreTrainedModel:
-    config = AutoConfig.from_pretrained(MODEL_PATH)
-    config.reference_compile = None
+    config = AutoConfig.from_pretrained(INPUT_PATH)
 
     if SCRATCH == True:
         return AutoModelForMaskedLM.from_config(
@@ -87,7 +91,7 @@ def load_model() -> PreTrainedModel:
         ).to("cuda" if torch.cuda.is_available() else "cpu")
     else:
         return AutoModelForMaskedLM.from_pretrained(
-            MODEL_PATH,
+            INPUT_PATH,
             config = config,
             attn_implementation = ATTN_IMPLEMENTATION,
             torch_dtype = torch.bfloat16 if PRECISION == "bf16_pure" and is_torch_bf16_gpu_available() == True else None,
@@ -99,7 +103,7 @@ def load_model() -> PreTrainedModel:
 # 加载分词器
 def load_tokenizer() -> PreTrainedTokenizerFast:
     return AutoTokenizer.from_pretrained(
-        MODEL_PATH,
+        INPUT_PATH,
         do_lower_case = False,
         local_files_only = True,
     )
@@ -241,14 +245,14 @@ def load_dataset(tokenizer: PreTrainedTokenizerFast) -> tuple[Dataset, Dataset]:
 
     # 如果数据集不存在，则生成数据集
     os.makedirs(f"{WORKSPACE}/cache", exist_ok = True)
-    if not os.path.isdir(f"{WORKSPACE}/{MODEL_NAME}_tokenized"):
+    if not os.path.isdir(f"{WORKSPACE}/{OUTPUT_NAME}_tokenized"):
         # 遍历数据集路径
         paths = []
         for path, threshold in DATASET_PATH:
             _, dir_name = os.path.split(path)
 
             # 如果数据文本文件不存在，则生成
-            output = f"{WORKSPACE}/{MODEL_NAME}_{dir_name}.txt"
+            output = f"{WORKSPACE}/{OUTPUT_NAME}_{dir_name}.txt"
             if os.path.isfile(output) == False:
                 generate_text_file(path, output, tokenizer, threshold)
 
@@ -263,18 +267,18 @@ def load_dataset(tokenizer: PreTrainedTokenizerFast) -> tuple[Dataset, Dataset]:
             num_proc = os.cpu_count(),
             batched = True,
             remove_columns = ["text"],
-            cache_file_name = f"{WORKSPACE}/cache/map/{MODEL_NAME}.cache",
+            cache_file_name = f"{WORKSPACE}/cache/map/{OUTPUT_NAME}.cache",
             load_from_cache_file = True,
         )
         dataset_tokenized.save_to_disk(
-            dataset_path = f"{WORKSPACE}/{MODEL_NAME}_tokenized",
+            dataset_path = f"{WORKSPACE}/{OUTPUT_NAME}_tokenized",
             num_proc = os.cpu_count(),
             max_shard_size = "4GB",
         )
 
     # 清理缓存并加载数据集
     shutil.rmtree(f"{WORKSPACE}/cache", ignore_errors = True)
-    dataset_tokenized = Dataset.load_from_disk(f"{WORKSPACE}/{MODEL_NAME}_tokenized")
+    dataset_tokenized = Dataset.load_from_disk(f"{WORKSPACE}/{OUTPUT_NAME}_tokenized")
 
     # 统计数据
     max_length = max(dataset_tokenized["length"])
@@ -285,8 +289,8 @@ def load_dataset(tokenizer: PreTrainedTokenizerFast) -> tuple[Dataset, Dataset]:
         seed = SEED,
         shuffle = True,
         test_size = EVAL_DATA,
-        test_indices_cache_file_name = f"{WORKSPACE}/cache/{MODEL_NAME}_eval_indices.cache",
-        train_indices_cache_file_name = f"{WORKSPACE}/cache/{MODEL_NAME}_train_indices.cache",
+        test_indices_cache_file_name = f"{WORKSPACE}/cache/{OUTPUT_NAME}_eval_indices.cache",
+        train_indices_cache_file_name = f"{WORKSPACE}/cache/{OUTPUT_NAME}_train_indices.cache",
     )
     eval_dataset, train_dataset = dataset_dict.get("test"), dataset_dict.get("train")
 
@@ -346,7 +350,7 @@ def print_model_parameters(model: PreTrainedModel) -> None:
             embedding = embedding + param.numel()
 
     print("")
-    print(f"{MODEL_NAME} : layer - {layer / 1e6:.2f} M / embedding - {embedding / 1e6:.2f} M / total - {total / 1e6:.2f} M")
+    print(f"{INPUT_NAME} : layer - {layer / 1e6:.2f} M / embedding - {embedding / 1e6:.2f} M / total - {total / 1e6:.2f} M")
     print("")
 
 # 开始训练
@@ -372,22 +376,24 @@ def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, e
         torch_compile = TORCH_COMPILE,
         bf16 = PRECISION in ("bf16", "bf16_pure"),
         optim = OPTIMIZER,
-        warmup_ratio = 0.10,
+        warmup_ratio = 0,
         weight_decay = WEIGHT_DECAY,
         learning_rate = LEARNING_RATE,
         num_train_epochs = EPOCHS,
         lr_scheduler_type = "warmup_stable_decay",
         lr_scheduler_kwargs = {
-            "num_decay_steps": int(len(train_dataset) * EPOCHS * 0.10 / max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE)) + 1,
-            "num_stable_steps": int(len(train_dataset) * EPOCHS * 0.80 / max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE)) + 1,
+            "num_decay_steps": int(len(train_dataset) * EPOCHS * 1.00 / max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE)),
+            "num_stable_steps": 0,
+            # "num_decay_steps": int(len(train_dataset) * EPOCHS * 0.10 / max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE)) + 1,
+            # "num_stable_steps": int(len(train_dataset) * EPOCHS * 0.90 / max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE)) + 1,
         },
         per_device_eval_batch_size = EVAL_SIZE,
         per_device_train_batch_size = BATCH_SIZE,
         gradient_checkpointing = GRADIENT_CHECKPOINTING,
         gradient_accumulation_steps = int(max(BATCH_SIZE, GRADIENT_ACCUMULATION_SIZE) / BATCH_SIZE),
         dataloader_pin_memory = True,
-        dataloader_num_workers = 8,
-        dataloader_persistent_workers = True,
+        dataloader_num_workers = min(8, os.cpu_count()),
+        dataloader_persistent_workers = False,
     )
 
     trainer = Trainer(
@@ -408,13 +414,13 @@ def start_training(model: PreTrainedModel, tokenizer: PreTrainedTokenizerFast, e
             trainer = trainer,
         )
     )
-    # trainer.add_callback(
-    #     MemoryCallback(
-    #         threshold = 0.93,
-    #         check_steps = 1,
-    #         force_clean_on_start = True,
-    #     )
-    # )
+    trainer.add_callback(
+        MemoryCallback(
+            threshold = 0.93,
+            check_steps = LOGGING_STEPS,
+            force_clean_on_start = True,
+        )
+    )
 
     # 检查是否自动恢复训练
     resume_from_checkpoint = f"{OUTPUT_PATH}/latest" if AUTO_RESUME_FROM_CHECKPOINT == True and os.path.isdir(f"{OUTPUT_PATH}/latest") else None
@@ -453,7 +459,7 @@ def main() -> None:
         import wandb
         wandb.init(
             project = "PT",
-            name = f"{MODEL_NAME}_{datetime.now().strftime("%Y%m%d_%H%M%S")}",
+            name = f"{OUTPUT_NAME}_{START_DATE}_{START_TIME}",
         )
 
     # 开始训练
@@ -462,9 +468,6 @@ def main() -> None:
     # 结束 wandb
     if WANDB_ENABLE == True:
         wandb.finish()
-
-    # 退出
-    os._exit(0)
 
 # 主函数
 if __name__ == "__main__":

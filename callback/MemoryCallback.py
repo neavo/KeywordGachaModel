@@ -20,7 +20,7 @@ class MemoryCallback(TrainerCallback):
     def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs) -> None:
         if state.global_step == 8 and self.force_clean_on_start == True:
             self.clear_memory(0.00)
-        elif state.global_step % self.check_steps == 0:
+        elif self.check_steps > 0 and state.global_step % self.check_steps == 0:
             self.clear_memory(self.threshold)
 
     # 清理显存
