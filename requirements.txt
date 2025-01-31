@@ -1,7 +1,8 @@
+--extra-index-url https://download.pytorch.org/whl/cu126
 transformers
-torch --index-url https://download.pytorch.org/whl/cu124
-torchaudio --index-url https://download.pytorch.org/whl/cu124
-torchvision --index-url https://download.pytorch.org/whl/cu124
+torch
+torchaudio
+torchvision
 flash-attn --no-build-isolation
 
 rich
